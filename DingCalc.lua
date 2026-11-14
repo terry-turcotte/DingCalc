@@ -1,0 +1,472 @@
+-- DingCalc: kills and quests to next level, by mob level and quest level.
+-- Mirrors the Wowhead "WoW Forever experience calculator" tables, live, in game.
+
+local ADDON = ...
+local floor, ceil, max, min = math.floor, math.ceil, math.max, math.min
+
+------------------------------------------------------------------------
+-- XP formulas (Classic rules; match Wowhead's Forever calculator)
+------------------------------------------------------------------------
+
+-- Zero-difference value: how fast XP drops for lower-level mobs.
+local function ZeroDiff(p)
+    if p <= 7 then return 5
+    elseif p <= 9 then return 6
+    elseif p <= 11 then return 7
+    elseif p <= 15 then return 8
+    elseif p <= 19 then return 9
+    elseif p <= 29 then return 11
+    elseif p <= 39 then return 12
+    elseif p <= 44 then return 13
+    elseif p <= 49 then return 14
+    elseif p <= 54 then return 15
+    elseif p <= 59 then return 16
+    else return 17 end
+end
+
+-- Highest mob level that is gray (gives no XP).
+local function GrayLevel(p)
+    if p <= 5 then return 0
+    elseif p <= 39 then return p - floor(p / 10) - 5
+    elseif p <= 59 then return p - floor(p / 5) - 1
+    else return p - 9 end
+end
+
+-- Base XP for one solo kill of a normal mob.
+local function MobXP(p, m)
+    if m <= GrayLevel(p) then return 0 end
+    if m >= p then
+        local d = min(m - p, 4)
+        -- base * (1 + 0.05*d), rounded with ties down (integer math, matches Wowhead)
+        return ceil(((p * 5 + 45) * (20 + d) - 10) / 20)
+    end
+    return floor((m * 5 + 45) * (1 - (p - m) / ZeroDiff(p)) + 0.5)
+end
+
+-- Quest XP penalty once you are 6+ levels above the quest.
+local function QuestMult(p, q)
+    local d = p - q
+    if d <= 5 then return 1
+    elseif d == 6 then return 0.8
+    elseif d == 7 then return 0.6
+    elseif d == 8 then return 0.4
+    elseif d == 9 then return 0.2
+    else return 0.1 end
+end
+
+-- Typical quest XP by quest level (Wowhead Forever calculator).
+-- Other levels are learned from your own turn-ins, or estimated ("~").
+local SEED_QUEST_XP = {
+    [5] = 450, [6] = 540, [7] = 630, [8] = 700, [9] = 780,
+    [10] = 840, [11] = 880, [12] = 910, [13] = 910, [14] = 980,
+}
+
+local function MobBase(l) return l * 5 + 45 end
+
+local DB
+
+local function KnownQuestXP(q)
+    local l = DB and DB.quest and DB.quest[q]
+    if l and l.n >= 3 then return floor(l.sum / l.n + 0.5), false end
+    if SEED_QUEST_XP[q] then return SEED_QUEST_XP[q], false end
+    if l and l.n > 0 then return floor(l.sum / l.n + 0.5), false end
+    return nil
+end
+
+-- Returns typical full XP for a quest of level q, and whether it is an estimate.
+local function TypicalQuestXP(q)
+    local xp, est = KnownQuestXP(q)
+    if xp then return xp, est end
+    -- Scale from the nearest known level.
+    for d = 1, 60 do
+        for _, k in ipairs({ q - d, q + d }) do
+            if k >= 1 then
+                local kxp = KnownQuestXP(k)
+                if kxp then
+                    return floor(kxp * MobBase(q) / MobBase(k) / 5 + 0.5) * 5, true
+                end
+            end
+        end
+    end
+    return MobBase(q) * 9, true
+end
+
+-- Kills needed, counting rested XP (doubles kill XP until the pool runs out).
+local function KillsNeeded(xp, remain, rested)
+    if xp <= 0 then return nil end
+    if remain <= 0 then return 0 end
+    local n = 0
+    if rested and rested > 0 then
+        local k = floor(rested / xp)
+        if k * 2 * xp >= remain then return ceil(remain / (2 * xp)) end
+        remain = remain - k * 2 * xp
+        n = k
+        local r = rested - k * xp
+        if r > 0 then
+            n = n + 1
+            remain = remain - (xp + r)
+            if remain <= 0 then return n end
+        end
+    end
+    return n + ceil(remain / xp)
+end
+
+local function DiffColor(p, l)
+    local d = l - p
+    if d >= 5 then return "ff2020"
+    elseif d >= 3 then return "ff8040"
+    elseif d >= -2 then return "ffff00"
+    elseif l > GrayLevel(p) then return "40c040"
+    else return "808080" end
+end
+
+------------------------------------------------------------------------
+-- Player state
+------------------------------------------------------------------------
+
+local function State()
+    local p = UnitLevel("player")
+    local cur, maxXP = UnitXP("player"), UnitXPMax("player")
+    local rested = GetXPExhaustion and GetXPExhaustion() or 0
+    return p, cur, maxXP, max(0, maxXP - cur), rested or 0
+end
+
+local function Mult(forKills)
+    local m = 1
+    if DB.wellRested then m = m * 1.03 end
+    if forKills and DB.wellFed then m = m * 1.05 end
+    return m
+end
+
+------------------------------------------------------------------------
+-- Quest log helpers (works with Classic-style and retail-style APIs)
+------------------------------------------------------------------------
+
+local questLevels = {}
+
+local function ForEachQuest(fn)
+    if C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo then
+        for i = 1, C_QuestLog.GetNumQuestLogEntries() do
+            local info = C_QuestLog.GetInfo(i)
+            if info and not info.isHeader and info.questID then
+                fn(info.questID, info.level, info.isComplete)
+            end
+        end
+    elseif GetNumQuestLogEntries and GetQuestLogTitle then
+        for i = 1, GetNumQuestLogEntries() do
+            local _, level, _, isHeader, _, isComplete, _, questID = GetQuestLogTitle(i)
+            if not isHeader and questID then fn(questID, level, isComplete) end
+        end
+    end
+end
+
+local function CacheQuestLevels()
+    ForEachQuest(function(id, level) questLevels[id] = level end)
+end
+
+local function QuestLogXP()
+    if not GetQuestLogRewardXP then return nil end
+    local total, count = 0, 0
+    ForEachQuest(function(id)
+        local ok, xp = pcall(GetQuestLogRewardXP, id)
+        if ok and type(xp) == "number" and xp > 0 then
+            total = total + xp
+            count = count + 1
+        end
+    end)
+    if count == 0 then return nil end
+    return total, count
+end
+
+------------------------------------------------------------------------
+-- UI
+------------------------------------------------------------------------
+
+local ROWS = 10
+local f = CreateFrame("Frame", "DingCalcFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+f:SetSize(340, 540)
+f:SetPoint("CENTER")
+f:SetFrameStrata("MEDIUM")
+f:SetMovable(true)
+f:EnableMouse(true)
+f:SetClampedToScreen(true)
+f:RegisterForDrag("LeftButton")
+f:SetScript("OnDragStart", f.StartMoving)
+f:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    local point, _, rel, x, y = self:GetPoint()
+    DB.pos = { point, rel, x, y }
+end)
+if f.SetBackdrop then
+    f:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    f:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
+end
+f:Hide()
+
+local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+close:SetPoint("TOPRIGHT", 0, 0)
+close:SetScript("OnClick", function() f:Hide(); DB.shown = false end)
+
+local function Text(parent, size, justify)
+    local fs = parent:CreateFontString(nil, "OVERLAY", size or "GameFontHighlightSmall")
+    fs:SetJustifyH(justify or "LEFT")
+    return fs
+end
+
+local title = Text(f, "GameFontNormal")
+title:SetPoint("TOPLEFT", 12, -10)
+title:SetText("DingCalc")
+
+local header = Text(f, "GameFontHighlight")
+header:SetPoint("TOPLEFT", 12, -30)
+
+local sub = Text(f)
+sub:SetPoint("TOPLEFT", 12, -48)
+
+local barBG = f:CreateTexture(nil, "ARTWORK")
+barBG:SetColorTexture(0.15, 0.15, 0.15, 1)
+barBG:SetPoint("TOPLEFT", 12, -64)
+barBG:SetSize(316, 10)
+local barRested = f:CreateTexture(nil, "ARTWORK", nil, 1)
+barRested:SetColorTexture(0.2, 0.4, 0.9, 0.6)
+barRested:SetPoint("LEFT", barBG, "LEFT")
+local bar = f:CreateTexture(nil, "ARTWORK", nil, 2)
+bar:SetColorTexture(0.6, 0.2, 0.8, 1)
+bar:SetPoint("LEFT", barBG, "LEFT")
+
+local targetLine = Text(f)
+targetLine:SetPoint("TOPLEFT", 12, -80)
+
+local function Check(label, key, x, y)
+    local cb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    cb:SetSize(22, 22)
+    cb:SetPoint("TOPLEFT", x, y)
+    local t = Text(f)
+    t:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+    t:SetText(label)
+    cb:SetScript("OnClick", function(self)
+        DB[key] = self:GetChecked() and true or false
+        f:Refresh()
+    end)
+    return cb
+end
+local cbRested = Check("Well-Rested (+3%)", "wellRested", 8, -96)
+local cbFed = Check("Well Fed (+5% kills)", "wellFed", 172, -96)
+
+-- Table builder
+local function MakeTable(top, heads, widths)
+    local t = { rows = {} }
+    local x = 12
+    for i, h in ipairs(heads) do
+        local fs = Text(f, "GameFontNormalSmall", i == 1 and "LEFT" or "RIGHT")
+        fs:SetWidth(widths[i])
+        fs:SetPoint("TOPLEFT", x, top)
+        fs:SetText(h)
+        x = x + widths[i]
+    end
+    for r = 1, ROWS do
+        local row = {}
+        x = 12
+        for i = 1, #heads do
+            local fs = Text(f, "GameFontHighlightSmall", i == 1 and "LEFT" or "RIGHT")
+            fs:SetWidth(widths[i])
+            fs:SetPoint("TOPLEFT", x, top - 4 - r * 15)
+            row[i] = fs
+            x = x + widths[i]
+        end
+        t.rows[r] = row
+    end
+    return t
+end
+
+local killsTitle = Text(f, "GameFontNormal")
+killsTitle:SetPoint("TOPLEFT", 12, -124)
+killsTitle:SetText("Kills (solo)")
+local kills = MakeTable(-142, { "Mob lvl", "XP", "Kills", "Elite XP", "Elite kills" }, { 56, 56, 64, 68, 72 })
+
+local questsTitle = Text(f, "GameFontNormal")
+questsTitle:SetPoint("TOPLEFT", 12, -320)
+questsTitle:SetText("Quests")
+local quests = MakeTable(-338, { "Quest lvl", "XP per quest", "Quests" }, { 80, 120, 116 })
+
+local logLine = Text(f)
+logLine:SetPoint("TOPLEFT", 12, -508)
+logLine:SetWidth(316)
+
+local function Fmt(n)
+    if not n then return "-" end
+    local s = tostring(n)
+    local out = s:reverse():gsub("(%d%d%d)", "%1 "):reverse()
+    return (out:gsub("^ ", ""))
+end
+
+function f:Refresh()
+    if not DB then return end
+    local p, cur, maxXP, remain, rested = State()
+    local pct = maxXP > 0 and cur / maxXP * 100 or 0
+    header:SetFormattedText("Level %d  —  %s XP to level %d", p, Fmt(remain), p + 1)
+    sub:SetFormattedText("%s / %s XP (%.1f%%)   Rested: %s", Fmt(cur), Fmt(maxXP), pct, Fmt(rested))
+    local w = 316
+    bar:SetWidth(max(1, w * (maxXP > 0 and cur / maxXP or 0)))
+    barRested:SetWidth(max(1, w * min(1, maxXP > 0 and (cur + rested) / maxXP or 0)))
+    cbRested:SetChecked(DB.wellRested)
+    cbFed:SetChecked(DB.wellFed)
+
+    local km = Mult(true)
+    local first = max(1, p - 5)
+    for r = 1, ROWS do
+        local m = first + r - 1
+        local row = kills.rows[r]
+        local xp = floor(MobXP(p, m) * km)
+        local c = DiffColor(p, m)
+        row[1]:SetText("|cff" .. c .. m .. "|r")
+        row[2]:SetText(xp > 0 and Fmt(xp) or "-")
+        row[3]:SetText(Fmt(KillsNeeded(xp, remain, rested)))
+        row[4]:SetText(xp > 0 and Fmt(xp * 2) or "-")
+        row[5]:SetText(Fmt(KillsNeeded(xp * 2, remain, rested)))
+    end
+
+    local qm = Mult(false)
+    for r = 1, ROWS do
+        local q = first + r - 1
+        local row = quests.rows[r]
+        local base, est = TypicalQuestXP(q)
+        local xp = floor(base * QuestMult(p, q) * qm)
+        row[1]:SetText("|cff" .. DiffColor(p, q) .. q .. "|r")
+        row[2]:SetText((est and "~" or "") .. Fmt(xp))
+        row[3]:SetText(xp > 0 and Fmt(ceil(remain / xp)) or "-")
+    end
+
+    local total, count = QuestLogXP()
+    if total then
+        logLine:SetFormattedText("Quest log: %d quests worth %s XP (%.0f%% of what you need)",
+            count, Fmt(total), remain > 0 and total / remain * 100 or 0)
+    else
+        logLine:SetText("|cff808080~ = estimate until you turn in quests of that level|r")
+    end
+
+    self:RefreshTarget()
+end
+
+function f:RefreshTarget()
+    local n, text = nil, nil
+    if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsPlayer("target") then
+        local p, _, _, remain, rested = State()
+        local m = UnitLevel("target")
+        if m and m > 0 then
+            local cls = UnitClassification("target")
+            local elite = cls == "elite" or cls == "rareelite" or cls == "worldboss"
+            local xp = floor(MobXP(p, m) * Mult(true)) * (elite and 2 or 1)
+            n = KillsNeeded(xp, remain, rested)
+            text = string.format("Target: |cff%s%d%s|r  %s XP  →  %s kills to ding",
+                DiffColor(p, m), m, elite and " elite" or "", Fmt(xp), n and Fmt(n) or "gray")
+        end
+    end
+    targetLine:SetText(text or "|cff808080Target a mob to see kills to ding|r")
+end
+
+------------------------------------------------------------------------
+-- Tooltip: "Kills to ding: N" on enemy mobs
+------------------------------------------------------------------------
+
+local function OnTooltipUnit(tt)
+    if not DB or DB.tooltip == false then return end
+    local _, unit = tt:GetUnit()
+    if not unit or UnitIsPlayer(unit) or not UnitCanAttack("player", unit) then return end
+    local p, _, _, remain, rested = State()
+    if p >= 60 then return end
+    local m = UnitLevel(unit)
+    if not m or m <= 0 then return end
+    local cls = UnitClassification(unit)
+    local elite = cls == "elite" or cls == "rareelite" or cls == "worldboss"
+    local xp = floor(MobXP(p, m) * Mult(true)) * (elite and 2 or 1)
+    local n = KillsNeeded(xp, remain, rested)
+    if n then
+        tt:AddLine(string.format("Kills to ding: %s  (%s XP each)", Fmt(n), Fmt(xp)), 0.6, 0.8, 1)
+        tt:Show()
+    end
+end
+
+if TooltipDataProcessor and Enum and Enum.TooltipDataType then
+    TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Unit, function(tt)
+        if tt == GameTooltip then OnTooltipUnit(tt) end
+    end)
+else
+    GameTooltip:HookScript("OnTooltipSetUnit", OnTooltipUnit)
+end
+
+------------------------------------------------------------------------
+-- Events
+------------------------------------------------------------------------
+
+local ev = CreateFrame("Frame")
+ev:RegisterEvent("ADDON_LOADED")
+ev:RegisterEvent("PLAYER_ENTERING_WORLD")
+ev:RegisterEvent("PLAYER_XP_UPDATE")
+ev:RegisterEvent("PLAYER_LEVEL_UP")
+ev:RegisterEvent("UPDATE_EXHAUSTION")
+ev:RegisterEvent("PLAYER_TARGET_CHANGED")
+ev:RegisterEvent("QUEST_LOG_UPDATE")
+ev:RegisterEvent("QUEST_TURNED_IN")
+
+ev:SetScript("OnEvent", function(_, event, a1, a2)
+    if event == "ADDON_LOADED" then
+        if a1 ~= ADDON then return end
+        DingCalcDB = DingCalcDB or {}
+        DB = DingCalcDB
+        DB.quest = DB.quest or {}
+        if DB.pos then
+            f:ClearAllPoints()
+            f:SetPoint(DB.pos[1], UIParent, DB.pos[2], DB.pos[3], DB.pos[4])
+        end
+        if DB.shown then f:Show() end
+        return
+    end
+    if not DB then return end
+
+    if event == "QUEST_LOG_UPDATE" then
+        CacheQuestLevels()
+    elseif event == "QUEST_TURNED_IN" then
+        -- Learn typical quest XP per quest level from your own turn-ins.
+        local id, xp = a1, a2
+        local q = questLevels[id]
+        local p = UnitLevel("player")
+        if q and q > 0 and type(xp) == "number" and xp > 0 and p < 60 then
+            local full = xp / QuestMult(p, q) / (DB.wellRested and 1.03 or 1)
+            local l = DB.quest[q] or { sum = 0, n = 0 }
+            l.sum, l.n = l.sum + floor(full + 0.5), l.n + 1
+            DB.quest[q] = l
+        end
+    end
+
+    if f:IsShown() then
+        if event == "PLAYER_TARGET_CHANGED" then f:RefreshTarget() else f:Refresh() end
+    end
+end)
+
+f:SetScript("OnShow", function(self) self:Refresh() end)
+
+------------------------------------------------------------------------
+-- Slash command
+------------------------------------------------------------------------
+
+SLASH_DINGCALC1 = "/ding"
+SLASH_DINGCALC2 = "/dingcalc"
+SlashCmdList.DINGCALC = function(msg)
+    msg = (msg or ""):lower()
+    if msg == "tooltip" then
+        DB.tooltip = DB.tooltip == false
+        print("|cff9966ffDingCalc|r: tooltip line " .. (DB.tooltip and "on" or "off"))
+    elseif msg == "reset" then
+        DB.pos = nil
+        f:ClearAllPoints()
+        f:SetPoint("CENTER")
+    else
+        if f:IsShown() then f:Hide(); DB.shown = false else f:Show(); DB.shown = true end
+    end
+end

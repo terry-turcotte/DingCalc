@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: DingCalc
+## Notes: Kills and quests to next level by mob level and quest level (like Wowhead's Forever experience calculator)
+## Author: Terry
+## Version: 1.0.0
+## X-License: MIT
+## SavedVariables: DingCalcDB
+
+DingCalc.lua
