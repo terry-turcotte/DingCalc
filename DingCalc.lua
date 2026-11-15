@@ -58,8 +58,13 @@ local function QuestMult(p, q)
     else return 0.1 end
 end
 
--- Typical quest XP by quest level (Wowhead Forever calculator).
--- Other levels are learned from your own turn-ins, or estimated ("~").
+-- Quests are averaged separately by type: normal, elite (group) and dungeon
+-- (raid quests count as dungeon), since elite and dungeon quests give more XP.
+local QUEST_TYPES = { "normal", "elite", "dungeon" }
+local TYPE_LABEL = { normal = "Normal", elite = "Elite", dungeon = "Dungeon" }
+
+-- Typical normal quest XP by quest level (Wowhead Forever calculator).
+-- Other levels and types are learned from your own turn-ins, or estimated ("~").
 local SEED_QUEST_XP = {
     [5] = 450, [6] = 540, [7] = 630, [8] = 700, [9] = 780,
     [10] = 840, [11] = 880, [12] = 910, [13] = 910, [14] = 980,
@@ -70,30 +75,33 @@ local function MobBase(l) return l * 5 + 45 end
 local DB      -- account-wide (DingCalcDB): learned quest XP, window position, tooltip toggle
 local CharDB  -- per character (DingCalcCharDB): buff checkboxes
 
-local function KnownQuestXP(q)
-    local l = DB and DB.quest and DB.quest[q]
-    if l and l.n >= 3 then return floor(l.sum / l.n + 0.5), false end
-    if SEED_QUEST_XP[q] then return SEED_QUEST_XP[q], false end
-    if l and l.n > 0 then return floor(l.sum / l.n + 0.5), false end
+local function KnownQuestXP(t, q)
+    local l = DB and DB.quest and DB.quest[t] and DB.quest[t][q]
+    local seed = t == "normal" and SEED_QUEST_XP[q]
+    if l and l.n >= 3 then return floor(l.sum / l.n + 0.5) end
+    if seed then return seed end
+    if l and l.n > 0 then return floor(l.sum / l.n + 0.5) end
     return nil
 end
 
--- Returns typical full XP for a quest of level q, and whether it is an estimate.
-local function TypicalQuestXP(q)
-    local xp, est = KnownQuestXP(q)
-    if xp then return xp, est end
-    -- Scale from the nearest known level.
+-- Returns typical full XP for a quest of type t and level q, and whether it
+-- is an estimate. Returns nil for elite/dungeon until one has been turned in.
+local function TypicalQuestXP(t, q)
+    local xp = KnownQuestXP(t, q)
+    if xp then return xp, false end
+    -- Scale from the nearest known level of the same type.
     for d = 1, 60 do
         for _, k in ipairs({ q - d, q + d }) do
             if k >= 1 then
-                local kxp = KnownQuestXP(k)
+                local kxp = KnownQuestXP(t, k)
                 if kxp then
                     return floor(kxp * MobBase(q) / MobBase(k) / 5 + 0.5) * 5, true
                 end
             end
         end
     end
-    return MobBase(q) * 9, true
+    if t == "normal" then return MobBase(q) * 9, true end
+    return nil
 end
 
 -- Kills needed, counting rested XP (doubles kill XP until the pool runs out).
@@ -147,26 +155,58 @@ end
 -- Quest log helpers (works with Classic-style and retail-style APIs)
 ------------------------------------------------------------------------
 
-local questLevels = {}
+local questLevels, questTypes = {}, {}
 
+-- fn(questID, level, isComplete, suggestedGroup, title)
 local function ForEachQuest(fn)
     if C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo then
         for i = 1, C_QuestLog.GetNumQuestLogEntries() do
             local info = C_QuestLog.GetInfo(i)
             if info and not info.isHeader and info.questID then
-                fn(info.questID, info.level, info.isComplete)
+                fn(info.questID, info.level, info.isComplete, info.suggestedGroup, info.title)
             end
         end
     elseif GetNumQuestLogEntries and GetQuestLogTitle then
         for i = 1, GetNumQuestLogEntries() do
-            local _, level, _, isHeader, _, isComplete, _, questID = GetQuestLogTitle(i)
-            if not isHeader and questID then fn(questID, level, isComplete) end
+            local title, level, group, isHeader, _, isComplete, _, questID = GetQuestLogTitle(i)
+            if not isHeader and questID then fn(questID, level, isComplete, group, title) end
         end
     end
 end
 
-local function CacheQuestLevels()
-    ForEachQuest(function(id, level) questLevels[id] = level end)
+-- Quest tag ids (Enum.QuestTag): 1 Elite/Group, 41 PvP, 62 Raid, 81 Dungeon,
+-- 85 Heroic, 88/89 Raid 10/25.
+local TAG_TYPE = { [1] = "elite", [62] = "dungeon", [81] = "dungeon", [85] = "dungeon",
+                   [88] = "dungeon", [89] = "dungeon" }
+
+local function QuestTag(id)
+    if C_QuestLog and C_QuestLog.GetQuestTagInfo then
+        local ok, info = pcall(C_QuestLog.GetQuestTagInfo, id)
+        if ok and type(info) == "table" then return info.tagID, info.tagName end
+    end
+    if GetQuestTagInfo then
+        local ok, tagID, tagName = pcall(GetQuestTagInfo, id)
+        if ok and tagID then return tagID, tagName end
+    end
+    return nil
+end
+
+-- Returns the quest's type and how it was found ("tag", "group" or "none").
+local function QuestType(id, group)
+    local tagID = QuestTag(id)
+    if tagID and TAG_TYPE[tagID] then return TAG_TYPE[tagID], "tag" end
+    if tagID then return "normal", "tag" end
+    -- No tag API or no tag: a suggested group size means a group quest. This
+    -- can't tell elite from dungeon, so it counts as elite.
+    if type(group) == "number" and group > 1 then return "elite", "group" end
+    return "normal", "none"
+end
+
+local function CacheQuestLog()
+    ForEachQuest(function(id, level, _, group)
+        questLevels[id] = level
+        questTypes[id] = QuestType(id, group)
+    end)
 end
 
 local function QuestLogXP()
@@ -297,6 +337,18 @@ local kills = MakeTable(-142, { "Mob lvl", "XP", "Kills", "Elite XP", "Elite kil
 local questsTitle = Text(f, "GameFontNormal")
 questsTitle:SetPoint("TOPLEFT", 12, -320)
 questsTitle:SetText("Quests")
+
+-- Quest type selector: click to cycle Normal -> Elite -> Dungeon.
+local typeBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+typeBtn:SetSize(90, 20)
+typeBtn:SetPoint("LEFT", questsTitle, "RIGHT", 10, 0)
+typeBtn:SetScript("OnClick", function()
+    local cur = DB.questType or "normal"
+    for i, t in ipairs(QUEST_TYPES) do
+        if t == cur then DB.questType = QUEST_TYPES[i % #QUEST_TYPES + 1]; break end
+    end
+    f:Refresh()
+end)
 local quests = MakeTable(-338, { "Quest lvl", "XP per quest", "Quests" }, { 80, 120, 116 })
 
 local logLine = Text(f)
@@ -336,19 +388,30 @@ function f:Refresh()
         row[5]:SetText(Fmt(KillsNeeded(xp * 2, remain, rested)))
     end
 
+    local qt = DB.questType or "normal"
+    typeBtn:SetText(TYPE_LABEL[qt])
     local qm = Mult(false)
+    local anyData = false
     for r = 1, ROWS do
         local q = first + r - 1
         local row = quests.rows[r]
-        local base, est = TypicalQuestXP(q)
-        local xp = floor(base * QuestMult(p, q) * qm)
+        local base, est = TypicalQuestXP(qt, q)
         row[1]:SetText("|cff" .. DiffColor(p, q) .. q .. "|r")
-        row[2]:SetText((est and "~" or "") .. Fmt(xp))
-        row[3]:SetText(xp > 0 and Fmt(ceil(remain / xp)) or "-")
+        if base then
+            anyData = true
+            local xp = floor(base * QuestMult(p, q) * qm)
+            row[2]:SetText((est and "~" or "") .. Fmt(xp))
+            row[3]:SetText(xp > 0 and Fmt(ceil(remain / xp)) or "-")
+        else
+            row[2]:SetText("-")
+            row[3]:SetText("-")
+        end
     end
 
     local total, count = QuestLogXP()
-    if total then
+    if not anyData then
+        logLine:SetFormattedText("|cff808080No %s quest turned in yet: no data|r", TYPE_LABEL[qt]:lower())
+    elseif total then
         logLine:SetFormattedText("Quest log: %d quests worth %s XP (%.0f%% of what you need)",
             count, Fmt(total), remain > 0 and total / remain * 100 or 0)
     else
@@ -425,6 +488,12 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         DingCalcDB = DingCalcDB or {}
         DB = DingCalcDB
         DB.quest = DB.quest or {}
+        if not DB.quest.normal then
+            -- Before 1.0.0-beta.3 learned XP was one table keyed by quest level,
+            -- with all quest types mixed. Keep it as the normal-quest table.
+            DB.quest = { normal = DB.quest }
+        end
+        for _, t in ipairs(QUEST_TYPES) do DB.quest[t] = DB.quest[t] or {} end
         if not DingCalcCharDB then
             -- First load on this character. Before 1.0.0-beta.2 the checkboxes
             -- were account-wide: hand them to the first character that logs in
@@ -443,18 +512,18 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
     if not CharDB then return end
 
     if event == "QUEST_LOG_UPDATE" then
-        CacheQuestLevels()
+        CacheQuestLog()
     elseif event == "QUEST_TURNED_IN" then
         -- Learn typical quest XP per quest level from your own turn-ins.
         local id, xp = a1, a2
-        local q = questLevels[id]
+        local q, t = questLevels[id], questTypes[id] or "normal"
         local p = UnitLevel("player")
         local qmult = q and QuestMult(p, q)
         if q and q > 0 and type(xp) == "number" and xp > 0 and p < 60 and qmult >= MIN_LEARN_MULT then
             local full = xp / qmult / (CharDB.wellRested and 1.03 or 1)
-            local l = DB.quest[q] or { sum = 0, n = 0 }
+            local l = DB.quest[t][q] or { sum = 0, n = 0 }
             l.sum, l.n = l.sum + floor(full + 0.5), l.n + 1
-            DB.quest[q] = l
+            DB.quest[t][q] = l
         end
     end
 
@@ -476,8 +545,21 @@ SlashCmdList.DINGCALC = function(msg)
     if msg == "tooltip" then
         DB.tooltip = DB.tooltip == false
         print("|cff9966ffDingCalc|r: tooltip line " .. (DB.tooltip and "on" or "off"))
+    elseif msg == "quests" then
+        -- Show how each quest in the log is classified (to check the client's API).
+        print("|cff9966ffDingCalc|r: quest types in your log (type / found by):")
+        local n = 0
+        ForEachQuest(function(id, level, _, group, title)
+            local t, how = QuestType(id, group)
+            local tagID, tagName = QuestTag(id)
+            print(string.format("  [%s] %s: %s / %s (tag %s%s, group %s)", tostring(level),
+                tostring(title or id), TYPE_LABEL[t], how, tostring(tagID),
+                tagName and (" " .. tagName) or "", tostring(group)))
+            n = n + 1
+        end)
+        if n == 0 then print("  (quest log is empty)") end
     elseif msg == "resetquests" then
-        DB.quest = {}
+        DB.quest = { normal = {}, elite = {}, dungeon = {} }
         print("|cff9966ffDingCalc|r: learned quest XP cleared (all characters)")
         if f:IsShown() then f:Refresh() end
     elseif msg == "reset" then

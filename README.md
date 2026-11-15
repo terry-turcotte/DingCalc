@@ -6,7 +6,7 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 
 - **Window** (`/ding`): your XP to next level, with an XP bar and rested XP. It shows:
   - a **kills table**: for mob levels from your level −5 to +4, the XP per kill and kills needed, for normal and elite mobs;
-  - a **quests table**: typical XP per quest by quest level (with the penalty once you are 6+ levels above the quest) and how many quests you need;
+  - a **quests table**: typical XP per quest by quest level (with the penalty once you are 6+ levels above the quest) and how many quests you need. A button next to the title switches between **Normal**, **Elite** and **Dungeon** quests, which are averaged separately;
   - your **quest log**: total XP of the quests in your log, and the share of what you need;
   - your **target**: kills to ding on the mob you are targeting.
 - **Tooltip**: a "Kills to ding: N" line when you hover an enemy mob.
@@ -28,6 +28,7 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 | `/ding` or `/dingcalc` | Show or hide the window |
 | `/ding tooltip` | Turn the tooltip line on or off |
 | `/ding reset` | Move the window back to the center of the screen |
+| `/ding quests` | List the quests in your log and the type (normal / elite / dungeon) DingCalc detects for each |
 | `/ding resetquests` | Forget the learned quest XP (for all characters) |
 
 You can drag the window to move it.
@@ -44,6 +45,7 @@ It uses the Classic XP rules, the same as Wowhead's Forever calculator:
 - **Mob XP**: `level × 5 + 45` for a same-level mob, +5% per level above you (capped at +4), reduced for lower mobs, and 0 for gray mobs. Elites give double XP.
 - **Quest XP**: 80% / 60% / 40% / 20% / 10% of full XP once you are 6 / 7 / 8 / 9 / 10+ levels above the quest.
 - **Typical quest XP** comes from Wowhead's table for levels 5–14. Other levels come from your own turn-ins (averaged), or are scaled from the nearest known level. Once a level has 3+ turn-ins, your average replaces Wowhead's value.
+- **Quest types**: each quest's type comes from its quest tag (Elite, Dungeon; Raid counts as Dungeon). If the client gives no tag but the quest has a suggested group size, it counts as Elite. Elite and Dungeon have no built-in values, so their table stays empty (`-`) until you turn in one of that type; after that, other levels are scaled from it (`~`).
 - **Learning**: each turn-in is converted back to full XP (undoing the level penalty and Well-Rested) before it is averaged. Turn-ins at 8+ levels above the quest (40% XP or less) are ignored, because that conversion would blow up rounding errors.
 
 ## Releases
