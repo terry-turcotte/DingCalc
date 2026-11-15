@@ -39,6 +39,31 @@ It uses the Classic XP rules, the same as Wowhead's Forever calculator:
 - **Quest XP**: 80% / 60% / 40% / 20% / 10% of full XP once you are 6 / 7 / 8 / 9 / 10+ levels above the quest.
 - **Typical quest XP** comes from Wowhead's table for levels 5–14. Other levels come from your own turn-ins (averaged), or are scaled from the nearest known level.
 
+## Releases
+
+Releases follow CurseForge's three release types, read from the version / tag name (the same rule the BigWigs packager uses):
+
+| Version in `DingCalc.toc` | Tag | CurseForge type |
+| --- | --- | --- |
+| `1.1.0-alpha.1` | `v1.1.0-alpha.1` | Alpha |
+| `1.0.0-beta.1` | `v1.0.0-beta.1` | Beta |
+| `1.0.0` | `v1.0.0` | Release |
+
+**To cut a release, bump `## Version:` in `DingCalc.toc` and merge to `main`.** No manual tag is needed: `.github/workflows/release.yml` runs on every push to `main`, and when the version has no tag yet it:
+
+1. runs the Lua syntax check;
+2. checks the version format and builds `DingCalc-<version>.zip` (a `DingCalc/` folder with the `.toc`, the Lua file, README and LICENSE) with `.github/scripts/package.sh`, which you can also run locally;
+3. creates the tag `v<version>` on that commit;
+4. creates a GitHub release with the zip and a changelog built from the commits since the previous tag. Alpha and beta releases are marked as pre-releases;
+5. uploads the zip to CurseForge with the matching release type, but only once these are set under *Settings → Secrets and variables → Actions*:
+   - secret `CF_API_KEY`: a CurseForge API token (legacy.curseforge.com → Account → API tokens);
+   - variable `CF_PROJECT_ID`: the project's numeric id;
+   - variable `CF_GAME_VERSION_IDS`: comma-separated CurseForge game version ids for the Forever client.
+
+   Without `CF_PROJECT_ID`, that step is skipped and only the GitHub release is made.
+
+Pushes that don't change the version release nothing. Pushing a `v*` tag by hand also works.
+
 ## License
 
 [MIT](LICENSE)
