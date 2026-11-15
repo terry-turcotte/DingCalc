@@ -11,8 +11,8 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
   - your **target**: kills to ding on the mob you are targeting.
 - **Tooltip**: a "Kills to ding: N" line when you hover an enemy mob.
 - **Rested XP** is counted: kills give double XP until the pool runs out.
-- **Well-Rested (+3%)** and **Well Fed (+5% kills)** checkboxes.
-- **Learns quest XP** from your own turn-ins. Quest levels with no data yet show an estimate, marked `~`.
+- **Well-Rested (+3%)** and **Well Fed (+5% kills)** checkboxes, saved per character.
+- **Learns quest XP** from your own turn-ins, shared by all your characters. Quest levels with no data yet show an estimate, marked `~`.
 - Mob levels are colored by difficulty (red, orange, yellow, green, gray).
 
 ## Install
@@ -28,8 +28,14 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 | `/ding` or `/dingcalc` | Show or hide the window |
 | `/ding tooltip` | Turn the tooltip line on or off |
 | `/ding reset` | Move the window back to the center of the screen |
+| `/ding resetquests` | Forget the learned quest XP (for all characters) |
 
-You can drag the window to move it. Its position and settings are saved per account (`DingCalcDB`).
+You can drag the window to move it.
+
+What is saved where:
+
+- **Per account** (`DingCalcDB`): learned quest XP, window position, tooltip on/off. Quest XP depends only on the quest, so every character adds to and uses the same table.
+- **Per character** (`DingCalcCharDB`): the Well-Rested and Well Fed checkboxes.
 
 ## How XP is computed
 
@@ -37,7 +43,8 @@ It uses the Classic XP rules, the same as Wowhead's Forever calculator:
 
 - **Mob XP**: `level × 5 + 45` for a same-level mob, +5% per level above you (capped at +4), reduced for lower mobs, and 0 for gray mobs. Elites give double XP.
 - **Quest XP**: 80% / 60% / 40% / 20% / 10% of full XP once you are 6 / 7 / 8 / 9 / 10+ levels above the quest.
-- **Typical quest XP** comes from Wowhead's table for levels 5–14. Other levels come from your own turn-ins (averaged), or are scaled from the nearest known level.
+- **Typical quest XP** comes from Wowhead's table for levels 5–14. Other levels come from your own turn-ins (averaged), or are scaled from the nearest known level. Once a level has 3+ turn-ins, your average replaces Wowhead's value.
+- **Learning**: each turn-in is converted back to full XP (undoing the level penalty and Well-Rested) before it is averaged. Turn-ins at 8+ levels above the quest (40% XP or less) are ignored, because that conversion would blow up rounding errors.
 
 ## Releases
 

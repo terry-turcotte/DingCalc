@@ -44,6 +44,10 @@ local function MobXP(p, m)
 end
 
 -- Quest XP penalty once you are 6+ levels above the quest.
+-- Turn-ins with a penalty below this are not learned from: working back to
+-- full XP from x0.4 or less multiplies the reward's rounding error 2.5-10x.
+local MIN_LEARN_MULT = 0.6
+
 local function QuestMult(p, q)
     local d = p - q
     if d <= 5 then return 1
@@ -63,7 +67,8 @@ local SEED_QUEST_XP = {
 
 local function MobBase(l) return l * 5 + 45 end
 
-local DB
+local DB      -- account-wide (DingCalcDB): learned quest XP, window position, tooltip toggle
+local CharDB  -- per character (DingCalcCharDB): buff checkboxes
 
 local function KnownQuestXP(q)
     local l = DB and DB.quest and DB.quest[q]
@@ -133,8 +138,8 @@ end
 
 local function Mult(forKills)
     local m = 1
-    if DB.wellRested then m = m * 1.03 end
-    if forKills and DB.wellFed then m = m * 1.05 end
+    if CharDB.wellRested then m = m * 1.03 end
+    if forKills and CharDB.wellFed then m = m * 1.05 end
     return m
 end
 
@@ -250,7 +255,7 @@ local function Check(label, key, x, y)
     t:SetPoint("LEFT", cb, "RIGHT", 2, 0)
     t:SetText(label)
     cb:SetScript("OnClick", function(self)
-        DB[key] = self:GetChecked() and true or false
+        CharDB[key] = self:GetChecked() and true or false
         f:Refresh()
     end)
     return cb
@@ -306,7 +311,7 @@ local function Fmt(n)
 end
 
 function f:Refresh()
-    if not DB then return end
+    if not CharDB then return end
     local p, cur, maxXP, remain, rested = State()
     local pct = maxXP > 0 and cur / maxXP * 100 or 0
     header:SetFormattedText("Level %d  —  %s XP to level %d", p, Fmt(remain), p + 1)
@@ -314,8 +319,8 @@ function f:Refresh()
     local w = 316
     bar:SetWidth(max(1, w * (maxXP > 0 and cur / maxXP or 0)))
     barRested:SetWidth(max(1, w * min(1, maxXP > 0 and (cur + rested) / maxXP or 0)))
-    cbRested:SetChecked(DB.wellRested)
-    cbFed:SetChecked(DB.wellFed)
+    cbRested:SetChecked(CharDB.wellRested)
+    cbFed:SetChecked(CharDB.wellFed)
 
     local km = Mult(true)
     local first = max(1, p - 5)
@@ -375,7 +380,7 @@ end
 ------------------------------------------------------------------------
 
 local function OnTooltipUnit(tt)
-    if not DB or DB.tooltip == false then return end
+    if not CharDB or DB.tooltip == false then return end
     local _, unit = tt:GetUnit()
     if not unit or UnitIsPlayer(unit) or not UnitCanAttack("player", unit) then return end
     local p, _, _, remain, rested = State()
@@ -420,6 +425,14 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         DingCalcDB = DingCalcDB or {}
         DB = DingCalcDB
         DB.quest = DB.quest or {}
+        if not DingCalcCharDB then
+            -- First load on this character. Before 1.0.0-beta.2 the checkboxes
+            -- were account-wide: hand them to the first character that logs in
+            -- and clear them, so other characters start unticked.
+            DingCalcCharDB = { wellRested = DB.wellRested, wellFed = DB.wellFed }
+            DB.wellRested, DB.wellFed = nil, nil
+        end
+        CharDB = DingCalcCharDB
         if DB.pos then
             f:ClearAllPoints()
             f:SetPoint(DB.pos[1], UIParent, DB.pos[2], DB.pos[3], DB.pos[4])
@@ -427,7 +440,7 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         if DB.shown then f:Show() end
         return
     end
-    if not DB then return end
+    if not CharDB then return end
 
     if event == "QUEST_LOG_UPDATE" then
         CacheQuestLevels()
@@ -436,8 +449,9 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         local id, xp = a1, a2
         local q = questLevels[id]
         local p = UnitLevel("player")
-        if q and q > 0 and type(xp) == "number" and xp > 0 and p < 60 then
-            local full = xp / QuestMult(p, q) / (DB.wellRested and 1.03 or 1)
+        local qmult = q and QuestMult(p, q)
+        if q and q > 0 and type(xp) == "number" and xp > 0 and p < 60 and qmult >= MIN_LEARN_MULT then
+            local full = xp / qmult / (CharDB.wellRested and 1.03 or 1)
             local l = DB.quest[q] or { sum = 0, n = 0 }
             l.sum, l.n = l.sum + floor(full + 0.5), l.n + 1
             DB.quest[q] = l
@@ -462,6 +476,10 @@ SlashCmdList.DINGCALC = function(msg)
     if msg == "tooltip" then
         DB.tooltip = DB.tooltip == false
         print("|cff9966ffDingCalc|r: tooltip line " .. (DB.tooltip and "on" or "off"))
+    elseif msg == "resetquests" then
+        DB.quest = {}
+        print("|cff9966ffDingCalc|r: learned quest XP cleared (all characters)")
+        if f:IsShown() then f:Refresh() end
     elseif msg == "reset" then
         DB.pos = nil
         f:ClearAllPoints()
