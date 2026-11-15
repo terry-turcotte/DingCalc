@@ -2,7 +2,7 @@
 ## Title: DingCalc
 ## Notes: Kills and quests to next level by mob level and quest level (like Wowhead's Forever experience calculator)
 ## Author: Terry
-## Version: 1.0.0
+## Version: 1.0.0-beta.1
 ## X-License: MIT
 ## SavedVariables: DingCalcDB
 
