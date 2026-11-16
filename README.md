@@ -1,3 +1,5 @@
+<p align="center"><img src="media/logo-256.png" alt="DingCalc logo" width="160"></p>
+
 # DingCalc
 
 A **WoW Forever** addon that tells you how many **kills** and **quests** you need to reach the next level, live, in game. It shows the same tables as Wowhead's *WoW Forever experience calculator*, worked out for your current level and XP.
@@ -72,6 +74,12 @@ Releases follow CurseForge's three release types, read from the version / tag na
    Without `CF_PROJECT_ID`, that step is skipped and only the GitHub release is made.
 
 Pushes that don't change the version release nothing. Pushing a `v*` tag by hand also works.
+
+## Logo
+
+`media/logo.svg` is the source of the logo, with PNG exports at 512, 256 and 64 px; use `logo-512.png` as the CurseForge project logo. It is original artwork. The lettering is [Cinzel](https://github.com/NDISCOVER/Cinzel) (SIL Open Font License), converted to outlines. `media/make_logo.py` regenerates the SVG. The `media/` folder is not included in the release zip.
+
+In the game's AddOns list, the `.toc` uses a game icon (`## IconTexture: Interface\Icons\INV_Misc_PocketWatch_01`), so no Blizzard file is copied into the addon. Clients without `IconTexture` support ignore the line.
 
 ## License
 
