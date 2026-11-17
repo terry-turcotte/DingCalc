@@ -124,6 +124,14 @@ local function KillsNeeded(xp, remain, rested)
     return n + ceil(remain / xp)
 end
 
+-- Difficulty bands shown in the window, by mob or quest level. Red is left
+-- out (rarely fought or quested); gray is left out (no kill XP).
+local BANDS = {
+    { name = "Green",  color = "40c040", lo = function(p) return GrayLevel(p) + 1 end, hi = function(p) return p - 3 end },
+    { name = "Yellow", color = "ffff00", lo = function(p) return p - 2 end,            hi = function(p) return p + 2 end },
+    { name = "Orange", color = "ff8040", lo = function(p) return p + 3 end,            hi = function(p) return p + 4 end },
+}
+
 local function DiffColor(p, l)
     local d = l - p
     if d >= 5 then return "ff2020"
@@ -227,9 +235,8 @@ end
 -- UI
 ------------------------------------------------------------------------
 
-local ROWS = 10
 local f = CreateFrame("Frame", "DingCalcFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-f:SetSize(340, 540)
+f:SetSize(340, 325)
 f:SetPoint("CENTER")
 f:SetFrameStrata("MEDIUM")
 f:SetMovable(true)
@@ -304,7 +311,7 @@ local cbRested = Check("Well-Rested (+3%)", "wellRested", 8, -96)
 local cbFed = Check("Well Fed (+5% kills)", "wellFed", 172, -96)
 
 -- Table builder
-local function MakeTable(top, heads, widths)
+local function MakeTable(top, heads, widths, nrows)
     local t = { rows = {} }
     local x = 12
     for i, h in ipairs(heads) do
@@ -314,7 +321,7 @@ local function MakeTable(top, heads, widths)
         fs:SetText(h)
         x = x + widths[i]
     end
-    for r = 1, ROWS do
+    for r = 1, nrows do
         local row = {}
         x = 12
         for i = 1, #heads do
@@ -332,10 +339,10 @@ end
 local killsTitle = Text(f, "GameFontNormal")
 killsTitle:SetPoint("TOPLEFT", 12, -124)
 killsTitle:SetText("Kills (solo)")
-local kills = MakeTable(-142, { "Mob lvl", "XP", "Kills", "Elite XP", "Elite kills" }, { 56, 56, 64, 68, 72 })
+local kills = MakeTable(-142, { "Mob lvl", "XP", "Kills", "Elite kills" }, { 104, 70, 70, 72 }, #BANDS)
 
 local questsTitle = Text(f, "GameFontNormal")
-questsTitle:SetPoint("TOPLEFT", 12, -320)
+questsTitle:SetPoint("TOPLEFT", 12, -206)
 questsTitle:SetText("Quests")
 
 -- Quest type selector: click to cycle Normal -> Elite -> Dungeon.
@@ -349,10 +356,10 @@ typeBtn:SetScript("OnClick", function()
     end
     f:Refresh()
 end)
-local quests = MakeTable(-338, { "Quest lvl", "XP per quest", "Quests" }, { 80, 120, 116 })
+local quests = MakeTable(-224, { "Quest lvl", "XP per quest", "Quests" }, { 104, 110, 102 }, #BANDS)
 
 local logLine = Text(f)
-logLine:SetPoint("TOPLEFT", 12, -508)
+logLine:SetPoint("TOPLEFT", 12, -292)
 logLine:SetWidth(316)
 
 local function Fmt(n)
@@ -360,6 +367,20 @@ local function Fmt(n)
     local s = tostring(n)
     local out = s:reverse():gsub("(%d%d%d)", "%1 "):reverse()
     return (out:gsub("^ ", ""))
+end
+
+-- "a" or "a–b" (smallest to largest); "-" when there is no value.
+local function Range(a, b)
+    if not a then return "-" end
+    if a > b then a, b = b, a end
+    if a == b then return Fmt(a) end
+    return Fmt(a) .. "–" .. Fmt(b)
+end
+
+-- First cell of a band row: colored band name and its level range.
+local function BandLabel(band, lo, hi)
+    local levels = lo > hi and "" or (lo == hi and (" " .. lo) or (" " .. lo .. "–" .. hi))
+    return "|cff" .. band.color .. band.name .. "|r" .. levels
 end
 
 function f:Refresh()
@@ -374,34 +395,53 @@ function f:Refresh()
     cbRested:SetChecked(CharDB.wellRested)
     cbFed:SetChecked(CharDB.wellFed)
 
+    -- One row per difficulty band: level range, then XP and counts as
+    -- "least–most" over the levels in the band.
     local km = Mult(true)
-    local first = max(1, p - 5)
-    for r = 1, ROWS do
-        local m = first + r - 1
+    for r, band in ipairs(BANDS) do
+        local lo, hi = max(1, band.lo(p)), band.hi(p)
         local row = kills.rows[r]
-        local xp = floor(MobXP(p, m) * km)
-        local c = DiffColor(p, m)
-        row[1]:SetText("|cff" .. c .. m .. "|r")
-        row[2]:SetText(xp > 0 and Fmt(xp) or "-")
-        row[3]:SetText(Fmt(KillsNeeded(xp, remain, rested)))
-        row[4]:SetText(xp > 0 and Fmt(xp * 2) or "-")
-        row[5]:SetText(Fmt(KillsNeeded(xp * 2, remain, rested)))
+        local xlo, xhi
+        for m = lo, hi do
+            local xp = floor(MobXP(p, m) * km)
+            if xp > 0 then
+                xlo, xhi = min(xlo or xp, xp), max(xhi or xp, xp)
+            end
+        end
+        row[1]:SetText(BandLabel(band, lo, hi))
+        row[2]:SetText(Range(xlo, xhi))
+        if xlo then
+            row[3]:SetText(Range(KillsNeeded(xhi, remain, rested), KillsNeeded(xlo, remain, rested)))
+            row[4]:SetText(Range(KillsNeeded(xhi * 2, remain, rested), KillsNeeded(xlo * 2, remain, rested)))
+        else
+            row[3]:SetText("-")
+            row[4]:SetText("-")
+        end
     end
 
     local qt = DB.questType or "normal"
     typeBtn:SetText(TYPE_LABEL[qt])
     local qm = Mult(false)
     local anyData = false
-    for r = 1, ROWS do
-        local q = first + r - 1
+    for r, band in ipairs(BANDS) do
+        local lo, hi = max(1, band.lo(p)), band.hi(p)
         local row = quests.rows[r]
-        local base, est = TypicalQuestXP(qt, q)
-        row[1]:SetText("|cff" .. DiffColor(p, q) .. q .. "|r")
-        if base then
+        local xlo, xhi, anyEst
+        for q = lo, hi do
+            local base, est = TypicalQuestXP(qt, q)
+            if base then
+                local xp = floor(base * QuestMult(p, q) * qm)
+                if xp > 0 then
+                    xlo, xhi = min(xlo or xp, xp), max(xhi or xp, xp)
+                    anyEst = anyEst or est
+                end
+            end
+        end
+        row[1]:SetText(BandLabel(band, lo, hi))
+        if xlo then
             anyData = true
-            local xp = floor(base * QuestMult(p, q) * qm)
-            row[2]:SetText((est and "~" or "") .. Fmt(xp))
-            row[3]:SetText(xp > 0 and Fmt(ceil(remain / xp)) or "-")
+            row[2]:SetText((anyEst and "~" or "") .. Range(xlo, xhi))
+            row[3]:SetText(Range(ceil(remain / xhi), ceil(remain / xlo)))
         else
             row[2]:SetText("-")
             row[3]:SetText("-")

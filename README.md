@@ -7,8 +7,8 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 ## Features
 
 - **Window** (`/ding`): your XP to next level, with an XP bar and rested XP. It shows:
-  - a **kills table**: for mob levels from your level −5 to +4, the XP per kill and kills needed, for normal and elite mobs;
-  - a **quests table**: XP per quest by quest level (with the penalty once you are 6+ levels above the quest) and how many quests you need. Normal, Elite and Dungeon quests each have their own table, switched with a button next to the title;
+  - a **kills table** with one row per difficulty color, **green**, **yellow** and **orange** (red mobs are left out): the mob levels in that color, XP per kill and kills needed, for normal and elite mobs. Values are shown as a range, from the lowest to the highest level of the color;
+  - a **quests table**, by the same green / yellow / orange colors: the quest levels in that color, XP per quest (with the penalty once you are 6+ levels above the quest) and how many quests you need. Normal, Elite and Dungeon quests each have their own table, switched with a button next to the title;
   - your **quest log**: total XP of the quests in your log, and the share of what you need;
   - your **target**: kills to ding on the mob you are targeting.
 - **Tooltip**: a "Kills to ding: N" line when you hover an enemy mob.
