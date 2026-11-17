@@ -75,12 +75,33 @@ local function MobBase(l) return l * 5 + 45 end
 local DB      -- account-wide (DingCalcDB): learned quest XP, window position, tooltip toggle
 local CharDB  -- per character (DingCalcCharDB): buff checkboxes
 
+-- Learned turn-ins per type and level: { n = count, sum = total,
+-- hist = { [full XP rounded to 5] = count } }. The typical value is the
+-- median (P50) of hist: quest XP comes in a few fixed amounts, and the median
+-- lands on the normal one, while the mean is dragged down by small quest-chain
+-- steps (talk to X, deliver a letter) that give only a few hundred XP.
+local function HistMedian(hist, n)
+    if not hist or not n or n <= 0 then return nil end
+    local vals = {}
+    for v in pairs(hist) do vals[#vals + 1] = v end
+    table.sort(vals)
+    -- Values at sorted positions lo and hi (equal when n is odd).
+    local lo, hi = floor((n + 1) / 2), floor(n / 2) + 1
+    local seen, a, b = 0, nil, nil
+    for _, v in ipairs(vals) do
+        seen = seen + hist[v]
+        if not a and seen >= lo then a = v end
+        if not b and seen >= hi then b = v; break end
+    end
+    return floor((a + b) / 2 + 0.5)
+end
+
 local function KnownQuestXP(t, q)
     local l = DB and DB.quest and DB.quest[t] and DB.quest[t][q]
     local seed = t == "normal" and SEED_QUEST_XP[q]
-    if l and l.n >= 3 then return floor(l.sum / l.n + 0.5) end
+    if l and l.n >= 3 then return HistMedian(l.hist, l.n) end
     if seed then return seed end
-    if l and l.n > 0 then return floor(l.sum / l.n + 0.5) end
+    if l and l.n > 0 then return HistMedian(l.hist, l.n) end
     return nil
 end
 
@@ -533,7 +554,16 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
             -- with all quest types mixed. Keep it as the normal-quest table.
             DB.quest = { normal = DB.quest }
         end
-        for _, t in ipairs(QUEST_TYPES) do DB.quest[t] = DB.quest[t] or {} end
+        for _, t in ipairs(QUEST_TYPES) do
+            DB.quest[t] = DB.quest[t] or {}
+            -- Before 1.0.0-beta.4 only sum and count were saved. Keep those
+            -- turn-ins as n samples of their old average.
+            for _, l in pairs(DB.quest[t]) do
+                if not l.hist and l.n and l.n > 0 then
+                    l.hist = { [floor(l.sum / l.n / 5 + 0.5) * 5] = l.n }
+                end
+            end
+        end
         if not DingCalcCharDB then
             -- First load on this character. Before 1.0.0-beta.2 the checkboxes
             -- were account-wide: hand them to the first character that logs in
@@ -561,8 +591,11 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         local qmult = q and QuestMult(p, q)
         if q and q > 0 and type(xp) == "number" and xp > 0 and p < 60 and qmult >= MIN_LEARN_MULT then
             local full = xp / qmult / (CharDB.wellRested and 1.03 or 1)
-            local l = DB.quest[t][q] or { sum = 0, n = 0 }
-            l.sum, l.n = l.sum + floor(full + 0.5), l.n + 1
+            local v = floor(full / 5 + 0.5) * 5
+            local l = DB.quest[t][q] or { sum = 0, n = 0, hist = {} }
+            l.hist = l.hist or {}
+            l.sum, l.n = l.sum + v, l.n + 1
+            l.hist[v] = (l.hist[v] or 0) + 1
             DB.quest[t][q] = l
         end
     end
@@ -598,6 +631,21 @@ SlashCmdList.DINGCALC = function(msg)
             n = n + 1
         end)
         if n == 0 then print("  (quest log is empty)") end
+    elseif msg == "stats" then
+        -- Learned quest XP for the type shown in the window, per quest level.
+        local t = DB.questType or "normal"
+        print(string.format("|cff9966ffDingCalc|r: learned %s quest XP (full XP, before penalties):", TYPE_LABEL[t]:lower()))
+        local levels = {}
+        for q in pairs(DB.quest[t]) do levels[#levels + 1] = q end
+        table.sort(levels)
+        for _, q in ipairs(levels) do
+            local l = DB.quest[t][q]
+            local lo, hi
+            for v in pairs(l.hist or {}) do lo, hi = min(lo or v, v), max(hi or v, v) end
+            print(string.format("  lvl %d: %d turn-ins, median %s, mean %s, range %s-%s", q, l.n,
+                Fmt(HistMedian(l.hist, l.n)), Fmt(floor(l.sum / l.n + 0.5)), Fmt(lo), Fmt(hi)))
+        end
+        if #levels == 0 then print("  (no turn-ins yet)") end
     elseif msg == "resetquests" then
         DB.quest = { normal = {}, elite = {}, dungeon = {} }
         print("|cff9966ffDingCalc|r: learned quest XP cleared (all characters)")

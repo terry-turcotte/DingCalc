@@ -31,6 +31,7 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 | `/ding tooltip` | Turn the tooltip line on or off |
 | `/ding reset` | Move the window back to the center of the screen |
 | `/ding quests` | List the quests in your log and the type (normal / elite / dungeon) DingCalc detects for each |
+| `/ding stats` | For the quest type shown in the window, list each quest level you have data for: turn-ins, median, average and range |
 | `/ding resetquests` | Forget the learned quest XP (for all characters) |
 
 You can drag the window to move it.
@@ -46,7 +47,7 @@ It uses the Classic XP rules, the same as Wowhead's Forever calculator:
 
 - **Mob XP**: `level × 5 + 45` for a same-level mob, +5% per level above you (capped at +4), reduced for lower mobs, and 0 for gray mobs. Elites give double XP.
 - **Quest XP**: 80% / 60% / 40% / 20% / 10% of full XP once you are 6 / 7 / 8 / 9 / 10+ levels above the quest.
-- **Quest XP per level**: built from the XP of every quest you turn in during your journey, averaged by quest type and level, and shared by all characters on your account. Until a level has 3 turn-ins, normal quests of levels 5–14 use Wowhead's values. Levels with no data are scaled from the nearest known level (`~`).
+- **Quest XP per level**: built from the XP of every quest you turn in during your journey, by quest type and level, and shared by all characters on your account. The value shown is the **median** (P50) of your turn-ins, not the average: quest XP comes in a few fixed amounts and most quests give the normal one, so the median ignores the small quest-chain steps (talk to X, deliver a letter) that give only a few hundred XP, as long as they are fewer than half. Until a level has 3 turn-ins, normal quests of levels 5–14 use Wowhead's values. Levels with no data are scaled from the nearest known level (`~`).
 - **Quest types**: each quest's type comes from its quest tag (Elite, Dungeon; Raid counts as Dungeon). If the client gives no tag but the quest has a suggested group size, it counts as Elite. Elite and Dungeon have no built-in values, so their table stays empty (`-`) until you turn in one of that type; after that, other levels are scaled from it (`~`).
 - **Learning**: each turn-in is converted back to full XP (undoing the level penalty and Well-Rested) before it is averaged, so turn-ins at any level count the same. Turn-ins made 8+ levels above the quest (40% XP or less) are ignored, because rounding makes them inaccurate.
 
