@@ -181,6 +181,124 @@ local function Mult(forKills)
 end
 
 ------------------------------------------------------------------------
+-- XP rate: XP per hour, live, by session / last hour / level / character
+------------------------------------------------------------------------
+-- Every XP gain (kills, quests, exploration) is credited to buckets of
+-- { xp, secs }. Only time spent logged in, below the level cap and not AFK
+-- counts, so the rate is "XP per hour of play".
+
+local MAX_LEVEL = 60
+local SESSION_GAP = 300    -- a logout shorter than this (a /reload) keeps the session
+local RECENT_MINUTES = 60  -- "last hour" = the last 60 minutes of the clock
+local MIN_SECS = 60        -- below a minute of data, a rate is noise
+
+local snap                 -- last XP reading: { level, xp, max }
+
+local function NewBucket() return { xp = 0, secs = 0 } end
+
+local function CharKey()
+    return (UnitName("player") or "?") .. "-" .. (GetRealmName and GetRealmName() or "?")
+end
+
+local function RateData() return CharDB and CharDB.rate end
+
+local function RateInit()
+    CharDB.rate = CharDB.rate or {}
+    local R = CharDB.rate
+    R.total = R.total or NewBucket()
+    R.levels = R.levels or {}
+    R.recent = R.recent or {}   -- { { m = minute (time() / 60), xp, secs }, ... } oldest first
+    local now = time()
+    if not R.session or not R.lastSeen or now - R.lastSeen > SESSION_GAP then
+        R.session = NewBucket()
+    end
+    R.lastSeen = now
+    DB.chars = DB.chars or {}
+end
+
+-- Credits xp and/or secs at a level to every bucket.
+local function Credit(level, xp, secs)
+    local R = RateData()
+    if not R then return end
+    R.levels[level] = R.levels[level] or NewBucket()
+    for _, b in ipairs({ R.session, R.total, R.levels[level] }) do
+        b.xp, b.secs = b.xp + xp, b.secs + secs
+    end
+    local m = floor(time() / 60)
+    local last = R.recent[#R.recent]
+    if not last or last.m ~= m then
+        last = { m = m, xp = 0, secs = 0 }
+        R.recent[#R.recent + 1] = last
+    end
+    last.xp, last.secs = last.xp + xp, last.secs + secs
+    while R.recent[1] and R.recent[1].m <= m - RECENT_MINUTES do table.remove(R.recent, 1) end
+end
+
+-- The last hour as one bucket.
+local function RecentBucket()
+    local R, b = RateData(), NewBucket()
+    if not R then return b end
+    local cutoff = floor(time() / 60) - RECENT_MINUTES
+    for _, r in ipairs(R.recent) do
+        if r.m > cutoff then b.xp, b.secs = b.xp + r.xp, b.secs + r.secs end
+    end
+    return b
+end
+
+-- XP per hour of a bucket, or nil until it holds a minute of play.
+local function PerHour(b)
+    if not b or b.secs < MIN_SECS then return nil end
+    return floor(b.xp / b.secs * 3600 + 0.5)
+end
+
+-- Called on every XP change: works out the gain since the last reading,
+-- including across a level-up (XP drops back toward 0 when you ding).
+local function OnXPChanged()
+    local p, cur, maxXP = UnitLevel("player"), UnitXP("player"), UnitXPMax("player")
+    if snap then
+        if p > snap.level or cur < snap.xp then
+            -- Ding: the rest of the old level, then what's in the new one.
+            -- The level can lag behind the XP for one event, so assume +1.
+            Credit(snap.level, max(0, snap.max - snap.xp), 0)
+            p = max(p, snap.level + 1)
+            if cur > 0 then Credit(p, cur, 0) end
+        elseif cur > snap.xp then
+            Credit(p, cur - snap.xp, 0)
+        end
+    end
+    snap = { level = p, xp = cur, max = maxXP }
+end
+
+local function SnapXP()
+    snap = { level = UnitLevel("player"), xp = UnitXP("player"), max = UnitXPMax("player") }
+end
+
+-- Called about once a second: adds the time played.
+local function AddPlayTime(dt)
+    local R = RateData()
+    if not R then return end
+    R.lastSeen = time()
+    local p = UnitLevel("player")
+    -- Skip loading-screen hitches, AFK time and the level cap.
+    if dt <= 0 or dt > 30 or p >= MAX_LEVEL or (UnitIsAFK and UnitIsAFK("player")) then return end
+    Credit(p, 0, dt)
+    local c = DB.chars[CharKey()] or {}
+    c.level, c.xp, c.secs = p, R.total.xp, R.total.secs
+    c.class = select(2, UnitClass("player"))
+    DB.chars[CharKey()] = c
+end
+
+-- "2 h 05 min", "34 min", "< 1 min"
+local function FmtTime(secs)
+    if not secs then return "-" end
+    secs = floor(secs + 0.5)
+    if secs < 60 then return "< 1 min" end
+    local h, m = floor(secs / 3600), floor(secs % 3600 / 60)
+    if h == 0 then return m .. " min" end
+    return string.format("%d h %02d min", h, m)
+end
+
+------------------------------------------------------------------------
 -- Quest log helpers (works with Classic-style and retail-style APIs)
 ------------------------------------------------------------------------
 
@@ -257,7 +375,7 @@ end
 ------------------------------------------------------------------------
 
 local f = CreateFrame("Frame", "DingCalcFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-f:SetSize(340, 325)
+f:SetSize(340, 400)
 f:SetPoint("CENTER")
 f:SetFrameStrata("MEDIUM")
 f:SetMovable(true)
@@ -383,6 +501,17 @@ local logLine = Text(f)
 logLine:SetPoint("TOPLEFT", 12, -292)
 logLine:SetWidth(316)
 
+local rateTitle = Text(f, "GameFontNormal")
+rateTitle:SetPoint("TOPLEFT", 12, -312)
+rateTitle:SetText("XP per hour")
+local rate = MakeTable(-330, { "", "Session", "Last hour", "This level", "Character" }, { 44, 66, 68, 70, 68 }, 2)
+rate.rows[1][1]:SetText("XP/h")
+rate.rows[2][1]:SetText("Played")
+
+local dingLine = Text(f)
+dingLine:SetPoint("TOPLEFT", 12, -372)
+dingLine:SetWidth(316)
+
 local function Fmt(n)
     if not n then return "-" end
     local s = tostring(n)
@@ -480,6 +609,33 @@ function f:Refresh()
     end
 
     self:RefreshTarget()
+    self:RefreshRate()
+end
+
+function f:RefreshRate()
+    local R = RateData()
+    if not R then return end
+    local p, _, _, remain = State()
+    local buckets = { R.session, RecentBucket(), R.levels[p] or NewBucket(), R.total }
+    for i, b in ipairs(buckets) do
+        local r = PerHour(b)
+        rate.rows[1][i + 1]:SetText(r and Fmt(r) or "-")
+        rate.rows[2][i + 1]:SetText(FmtTime(b.secs))
+    end
+    if p >= MAX_LEVEL then
+        dingLine:SetText("|cff808080Max level: no XP to track|r")
+        return
+    end
+    -- Pace for the ETA: the most recent rate that has data.
+    local labels = { "session", "last hour", "this level", "character" }
+    for _, i in ipairs({ 2, 1, 3, 4 }) do
+        local r = PerHour(buckets[i])
+        if r and r > 0 then
+            dingLine:SetFormattedText("Ding in |cffffffff~%s|r  (at your %s pace)", FmtTime(remain / r * 3600), labels[i])
+            return
+        end
+    end
+    dingLine:SetText("|cff808080Ding ETA after a minute of play|r")
 end
 
 function f:RefreshTarget()
@@ -542,6 +698,21 @@ ev:RegisterEvent("UPDATE_EXHAUSTION")
 ev:RegisterEvent("PLAYER_TARGET_CHANGED")
 ev:RegisterEvent("QUEST_LOG_UPDATE")
 ev:RegisterEvent("QUEST_TURNED_IN")
+ev:RegisterEvent("PLAYER_LOGOUT")
+
+-- Play-time clock for the XP rate; redraws the rate section every few seconds.
+local tickAcc, redrawAcc = 0, 0
+ev:SetScript("OnUpdate", function(_, elapsed)
+    tickAcc, redrawAcc = tickAcc + elapsed, redrawAcc + elapsed
+    if tickAcc >= 1 then
+        AddPlayTime(tickAcc)
+        tickAcc = 0
+    end
+    if redrawAcc >= 5 then
+        redrawAcc = 0
+        if f:IsShown() then f:RefreshRate() end
+    end
+end)
 
 ev:SetScript("OnEvent", function(_, event, a1, a2)
     if event == "ADDON_LOADED" then
@@ -572,6 +743,7 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
             DB.wellRested, DB.wellFed = nil, nil
         end
         CharDB = DingCalcCharDB
+        RateInit()
         if DB.pos then
             f:ClearAllPoints()
             f:SetPoint(DB.pos[1], UIParent, DB.pos[2], DB.pos[3], DB.pos[4])
@@ -581,7 +753,14 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
     end
     if not CharDB then return end
 
-    if event == "QUEST_LOG_UPDATE" then
+    if event == "PLAYER_ENTERING_WORLD" then
+        SnapXP()
+    elseif event == "PLAYER_XP_UPDATE" or event == "PLAYER_LEVEL_UP" then
+        OnXPChanged()
+    elseif event == "PLAYER_LOGOUT" then
+        CharDB.rate.lastSeen = time()
+        return
+    elseif event == "QUEST_LOG_UPDATE" then
         CacheQuestLog()
     elseif event == "QUEST_TURNED_IN" then
         -- Learn typical quest XP per quest level from your own turn-ins.
@@ -646,6 +825,33 @@ SlashCmdList.DINGCALC = function(msg)
                 Fmt(HistMedian(l.hist, l.n)), Fmt(floor(l.sum / l.n + 0.5)), Fmt(lo), Fmt(hi)))
         end
         if #levels == 0 then print("  (no turn-ins yet)") end
+    elseif msg == "rate" then
+        -- XP per hour of this character, level by level, then all characters.
+        local R = RateData()
+        print("|cff9966ffDingCalc|r: XP per hour, this character, by level:")
+        local levels = {}
+        for l in pairs(R.levels) do levels[#levels + 1] = l end
+        table.sort(levels)
+        for _, l in ipairs(levels) do
+            local b = R.levels[l]
+            print(string.format("  lvl %d: %s XP/h, %s played, %s XP", l, Fmt(PerHour(b)), FmtTime(b.secs), Fmt(b.xp)))
+        end
+        if #levels == 0 then print("  (no data yet)") end
+        print("|cff9966ffDingCalc|r: all characters on this account:")
+        local keys = {}
+        for k in pairs(DB.chars or {}) do keys[#keys + 1] = k end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local c = DB.chars[k]
+            print(string.format("  %s (lvl %s %s): %s XP/h over %s", k, tostring(c.level), tostring(c.class or ""),
+                Fmt(PerHour(c)), FmtTime(c.secs)))
+        end
+    elseif msg == "resetrate" then
+        CharDB.rate = nil
+        RateInit()
+        if DB.chars then DB.chars[CharKey()] = nil end
+        print("|cff9966ffDingCalc|r: XP rate cleared for this character")
+        if f:IsShown() then f:Refresh() end
     elseif msg == "resetquests" then
         DB.quest = { normal = {}, elite = {}, dungeon = {} }
         print("|cff9966ffDingCalc|r: learned quest XP cleared (all characters)")

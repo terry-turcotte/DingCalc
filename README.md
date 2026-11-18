@@ -10,7 +10,8 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
   - a **kills table** with one row per difficulty color, **green**, **yellow** and **orange** (red mobs are left out): the mob levels in that color, XP per kill and kills needed, for normal and elite mobs. Values are shown as a range, from the lowest to the highest level of the color;
   - a **quests table**, by the same green / yellow / orange colors: the quest levels in that color, XP per quest (with the penalty once you are 6+ levels above the quest) and how many quests you need. Normal, Elite and Dungeon quests each have their own table, switched with a button next to the title;
   - your **quest log**: total XP of the quests in your log, and the share of what you need;
-  - your **target**: kills to ding on the mob you are targeting.
+  - your **target**: kills to ding on the mob you are targeting;
+  - your **XP per hour**, live, for this **session**, the **last hour**, **this level** and this **character**, with the time played for each, and an **ETA to ding** at your current pace.
 - **Tooltip**: a "Kills to ding: N" line when you hover an enemy mob.
 - **Rested XP** is counted: kills give double XP until the pool runs out.
 - **Well-Rested (+3%)** and **Well Fed (+5% kills)** checkboxes, saved per character.
@@ -32,6 +33,8 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 | `/ding reset` | Move the window back to the center of the screen |
 | `/ding quests` | List the quests in your log and the type (normal / elite / dungeon) DingCalc detects for each |
 | `/ding stats` | For the quest type shown in the window, list each quest level you have data for: turn-ins, median, average and range |
+| `/ding rate` | XP per hour of this character level by level, then of every character on the account |
+| `/ding resetrate` | Forget this character's XP rate data |
 | `/ding resetquests` | Forget the learned quest XP (for all characters) |
 
 You can drag the window to move it.
@@ -39,7 +42,17 @@ You can drag the window to move it.
 What is saved where:
 
 - **Per account** (`DingCalcDB`): learned quest XP, window position, tooltip on/off. Quest XP depends only on the quest, so every character adds to and uses the same table.
-- **Per character** (`DingCalcCharDB`): the Well-Rested and Well Fed checkboxes.
+- **Per character** (`DingCalcCharDB`): the Well-Rested and Well Fed checkboxes, and the XP rate data (session, last hour, per level, total).
+- The account file also keeps a one-line summary per character (level, XP/h, time played) for `/ding rate`.
+
+## How XP per hour is measured
+
+- Every XP gain counts (kills, quests, exploration), including across a level-up.
+- Only **play time** counts: logged in, not AFK, below level 60. So it is XP per hour of play, not per hour of the clock.
+- **Session**: since you logged in. A logout shorter than 5 minutes (a `/reload`) keeps the session.
+- **Last hour**: the last 60 minutes of the clock. Time logged out or AFK in that hour doesn't count against you.
+- **This level** and **Character**: everything since the addon started tracking on this character.
+- A rate shows once it has a minute of data. The ding ETA uses the last-hour pace, or the next one that has data.
 
 ## How XP is computed
 
