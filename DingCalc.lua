@@ -181,6 +181,124 @@ local function Mult(forKills)
 end
 
 ------------------------------------------------------------------------
+-- XP rate: XP per hour, live, by session / last hour / level / character
+------------------------------------------------------------------------
+-- Every XP gain (kills, quests, exploration) is credited to buckets of
+-- { xp, secs }. Only time spent logged in, below the level cap and not AFK
+-- counts, so the rate is "XP per hour of play".
+
+local MAX_LEVEL = 60
+local SESSION_GAP = 300    -- a logout shorter than this (a /reload) keeps the session
+local RECENT_MINUTES = 60  -- "last hour" = the last 60 minutes of the clock
+local MIN_SECS = 60        -- below a minute of data, a rate is noise
+
+local snap                 -- last XP reading: { level, xp, max }
+
+local function NewBucket() return { xp = 0, secs = 0 } end
+
+local function CharKey()
+    return (UnitName("player") or "?") .. "-" .. (GetRealmName and GetRealmName() or "?")
+end
+
+local function RateData() return CharDB and CharDB.rate end
+
+local function RateInit()
+    CharDB.rate = CharDB.rate or {}
+    local R = CharDB.rate
+    R.total = R.total or NewBucket()
+    R.levels = R.levels or {}
+    R.recent = R.recent or {}   -- { { m = minute (time() / 60), xp, secs }, ... } oldest first
+    local now = time()
+    if not R.session or not R.lastSeen or now - R.lastSeen > SESSION_GAP then
+        R.session = NewBucket()
+    end
+    R.lastSeen = now
+    DB.chars = DB.chars or {}
+end
+
+-- Credits xp and/or secs at a level to every bucket.
+local function Credit(level, xp, secs)
+    local R = RateData()
+    if not R then return end
+    R.levels[level] = R.levels[level] or NewBucket()
+    for _, b in ipairs({ R.session, R.total, R.levels[level] }) do
+        b.xp, b.secs = b.xp + xp, b.secs + secs
+    end
+    local m = floor(time() / 60)
+    local last = R.recent[#R.recent]
+    if not last or last.m ~= m then
+        last = { m = m, xp = 0, secs = 0 }
+        R.recent[#R.recent + 1] = last
+    end
+    last.xp, last.secs = last.xp + xp, last.secs + secs
+    while R.recent[1] and R.recent[1].m <= m - RECENT_MINUTES do table.remove(R.recent, 1) end
+end
+
+-- The last hour as one bucket.
+local function RecentBucket()
+    local R, b = RateData(), NewBucket()
+    if not R then return b end
+    local cutoff = floor(time() / 60) - RECENT_MINUTES
+    for _, r in ipairs(R.recent) do
+        if r.m > cutoff then b.xp, b.secs = b.xp + r.xp, b.secs + r.secs end
+    end
+    return b
+end
+
+-- XP per hour of a bucket, or nil until it holds a minute of play.
+local function PerHour(b)
+    if not b or b.secs < MIN_SECS then return nil end
+    return floor(b.xp / b.secs * 3600 + 0.5)
+end
+
+-- Called on every XP change: works out the gain since the last reading,
+-- including across a level-up (XP drops back toward 0 when you ding).
+local function OnXPChanged()
+    local p, cur, maxXP = UnitLevel("player"), UnitXP("player"), UnitXPMax("player")
+    if snap then
+        if p > snap.level or cur < snap.xp then
+            -- Ding: the rest of the old level, then what's in the new one.
+            -- The level can lag behind the XP for one event, so assume +1.
+            Credit(snap.level, max(0, snap.max - snap.xp), 0)
+            p = max(p, snap.level + 1)
+            if cur > 0 then Credit(p, cur, 0) end
+        elseif cur > snap.xp then
+            Credit(p, cur - snap.xp, 0)
+        end
+    end
+    snap = { level = p, xp = cur, max = maxXP }
+end
+
+local function SnapXP()
+    snap = { level = UnitLevel("player"), xp = UnitXP("player"), max = UnitXPMax("player") }
+end
+
+-- Called about once a second: adds the time played.
+local function AddPlayTime(dt)
+    local R = RateData()
+    if not R then return end
+    R.lastSeen = time()
+    local p = UnitLevel("player")
+    -- Skip loading-screen hitches, AFK time and the level cap.
+    if dt <= 0 or dt > 30 or p >= MAX_LEVEL or (UnitIsAFK and UnitIsAFK("player")) then return end
+    Credit(p, 0, dt)
+    local c = DB.chars[CharKey()] or {}
+    c.level, c.xp, c.secs = p, R.total.xp, R.total.secs
+    c.class = select(2, UnitClass("player"))
+    DB.chars[CharKey()] = c
+end
+
+-- "2 h 05 min", "34 min", "< 1 min"
+local function FmtTime(secs)
+    if not secs then return "-" end
+    secs = floor(secs + 0.5)
+    if secs < 60 then return "< 1 min" end
+    local h, m = floor(secs / 3600), floor(secs % 3600 / 60)
+    if h == 0 then return m .. " min" end
+    return string.format("%d h %02d min", h, m)
+end
+
+------------------------------------------------------------------------
 -- Quest log helpers (works with Classic-style and retail-style APIs)
 ------------------------------------------------------------------------
 
@@ -500,6 +618,150 @@ function f:RefreshTarget()
 end
 
 ------------------------------------------------------------------------
+-- XP bar: a full-width strip docked at the bottom (or top) of the screen,
+-- like Titan Panel, with live XP per hour and the time to ding.
+------------------------------------------------------------------------
+
+local BAR_H = 20
+local GOLD, GREY = "|cffe3bb5e", "|cff808080"
+
+local xpBar = CreateFrame("Button", "DingCalcBar", UIParent)
+xpBar:SetHeight(BAR_H)
+xpBar:SetFrameStrata("LOW")     -- windows and action bars stay above it
+xpBar:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+xpBar:Hide()
+
+local barBg = xpBar:CreateTexture(nil, "BACKGROUND")
+barBg:SetAllPoints()
+barBg:SetColorTexture(0.04, 0.04, 0.06, 0.88)
+local barEdge = xpBar:CreateTexture(nil, "BORDER")    -- 1 px line on the screen side
+barEdge:SetHeight(1)
+barEdge:SetColorTexture(0.89, 0.73, 0.37, 0.5)
+
+local barIcon = xpBar:CreateTexture(nil, "ARTWORK")
+barIcon:SetSize(14, 14)
+barIcon:SetPoint("LEFT", 8, 0)
+barIcon:SetTexture("Interface\\Icons\\INV_Misc_PocketWatch_01")
+barIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+-- Left-to-right segments, each followed by a thin separator.
+local SEGMENTS = { "level", "xp", "session", "recent", "thislevel", "char" }
+local seg = {}
+local prev, prevPoint, gap = barIcon, "RIGHT", 6
+for i, key in ipairs(SEGMENTS) do
+    local fs = xpBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("LEFT", prev, prevPoint, gap, 0)
+    seg[key] = fs
+    if i < #SEGMENTS then
+        local sep = xpBar:CreateTexture(nil, "ARTWORK")
+        sep:SetSize(1, BAR_H - 8)
+        sep:SetColorTexture(1, 1, 1, 0.18)
+        sep:SetPoint("LEFT", fs, "RIGHT", 10, 0)
+        prev, prevPoint, gap = sep, "RIGHT", 10
+    end
+end
+-- Time to ding, on the right end.
+local segDing = xpBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+segDing:SetPoint("RIGHT", -10, 0)
+segDing:SetJustifyH("RIGHT")
+
+-- The four rate buckets, in display order.
+local function RateBuckets()
+    local R = RateData()
+    local p = UnitLevel("player")
+    return {
+        { label = "Session",    b = R.session },
+        { label = "Last hour",  b = RecentBucket() },
+        { label = "This level", b = R.levels[p] or NewBucket() },
+        { label = "Character",  b = R.total },
+    }
+end
+
+-- Time to ding at the most recent pace that has data.
+local function DingETA(buckets, remain)
+    for _, i in ipairs({ 2, 1, 3, 4 }) do
+        local r = PerHour(buckets[i].b)
+        if r and r > 0 then return remain / r * 3600, buckets[i].label:lower() end
+    end
+end
+
+local function RateText(label, b)
+    local r = PerHour(b)
+    return GOLD .. label .. "|r " .. (r and (Fmt(r) .. GREY .. " XP/h|r") or (GREY .. "-|r"))
+end
+
+function xpBar:Place()
+    self:ClearAllPoints()
+    barEdge:ClearAllPoints()
+    if DB.barPos == "top" then
+        self:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
+        self:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", 0, 0)
+        barEdge:SetPoint("BOTTOMLEFT"); barEdge:SetPoint("BOTTOMRIGHT")
+    else
+        self:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 0, 0)
+        self:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", 0, 0)
+        barEdge:SetPoint("TOPLEFT"); barEdge:SetPoint("TOPRIGHT")
+    end
+end
+
+function xpBar:Refresh()
+    if not RateData() or not self:IsShown() then return end
+    local p, cur, maxXP, remain, rested = State()
+    seg.level:SetText(GOLD .. "Level|r " .. p)
+    if p >= MAX_LEVEL then
+        seg.xp:SetText(GREY .. "max level|r")
+        for _, k in ipairs({ "session", "recent", "thislevel", "char" }) do seg[k]:SetText("") end
+        segDing:SetText("")
+        return
+    end
+    seg.xp:SetText(string.format("%s / %s %s(%.0f%%)|r%s", Fmt(cur), Fmt(maxXP), GREY,
+        maxXP > 0 and cur / maxXP * 100 or 0,
+        rested > 0 and ("  |cff4d80e6+" .. Fmt(rested) .. " rested|r") or ""))
+    local buckets = RateBuckets()
+    seg.session:SetText(RateText("Session", buckets[1].b))
+    seg.recent:SetText(RateText("Last hour", buckets[2].b))
+    seg.thislevel:SetText(RateText("This level", buckets[3].b))
+    seg.char:SetText(RateText("Character", buckets[4].b))
+    local eta = DingETA(buckets, remain)
+    segDing:SetText(Fmt(remain) .. GREY .. " XP to go|r   " .. GOLD .. "Ding in|r "
+        .. (eta and ("~" .. FmtTime(eta)) or (GREY .. "-|r")))
+end
+
+xpBar:SetScript("OnShow", function(self) self:Refresh() end)
+xpBar:SetScript("OnClick", function(self, button)
+    if button == "RightButton" then
+        DB.barPos = DB.barPos == "top" and "bottom" or "top"
+        self:Place()
+    elseif f:IsShown() then
+        f:Hide(); DB.shown = false
+    else
+        f:Show(); DB.shown = true
+    end
+end)
+xpBar:SetScript("OnEnter", function(self)
+    if not RateData() then return end
+    GameTooltip:SetOwner(self, DB.barPos == "top" and "ANCHOR_BOTTOM" or "ANCHOR_TOP")
+    GameTooltip:AddLine("DingCalc: XP per hour of play")
+    for _, x in ipairs(RateBuckets()) do
+        local r = PerHour(x.b)
+        GameTooltip:AddDoubleLine(x.label, string.format("%s XP/h  (%s XP in %s)",
+            r and Fmt(r) or "-", Fmt(x.b.xp), FmtTime(x.b.secs)), 1, 0.82, 0, 1, 1, 1)
+    end
+    local p, _, _, remain = State()
+    if p < MAX_LEVEL then
+        local eta, pace = DingETA(RateBuckets(), remain)
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddDoubleLine("Ding in", eta and ("~" .. FmtTime(eta) .. " (" .. pace .. " pace)") or "-",
+            1, 0.82, 0, 1, 1, 1)
+    end
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Left-click: DingCalc window", 0.6, 0.6, 0.6)
+    GameTooltip:AddLine("Right-click: move to the " .. (DB.barPos == "top" and "bottom" or "top"), 0.6, 0.6, 0.6)
+    GameTooltip:Show()
+end)
+xpBar:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+------------------------------------------------------------------------
 -- Tooltip: "Kills to ding: N" on enemy mobs
 ------------------------------------------------------------------------
 
@@ -542,6 +804,21 @@ ev:RegisterEvent("UPDATE_EXHAUSTION")
 ev:RegisterEvent("PLAYER_TARGET_CHANGED")
 ev:RegisterEvent("QUEST_LOG_UPDATE")
 ev:RegisterEvent("QUEST_TURNED_IN")
+ev:RegisterEvent("PLAYER_LOGOUT")
+
+-- Play-time clock for the XP rate; redraws the rate section every few seconds.
+local tickAcc, redrawAcc = 0, 0
+ev:SetScript("OnUpdate", function(_, elapsed)
+    tickAcc, redrawAcc = tickAcc + elapsed, redrawAcc + elapsed
+    if tickAcc >= 1 then
+        AddPlayTime(tickAcc)
+        tickAcc = 0
+    end
+    if redrawAcc >= 5 then
+        redrawAcc = 0
+        xpBar:Refresh()
+    end
+end)
 
 ev:SetScript("OnEvent", function(_, event, a1, a2)
     if event == "ADDON_LOADED" then
@@ -572,16 +849,26 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
             DB.wellRested, DB.wellFed = nil, nil
         end
         CharDB = DingCalcCharDB
+        RateInit()
         if DB.pos then
             f:ClearAllPoints()
             f:SetPoint(DB.pos[1], UIParent, DB.pos[2], DB.pos[3], DB.pos[4])
         end
         if DB.shown then f:Show() end
+        xpBar:Place()
+        if DB.bar ~= false then xpBar:Show() end
         return
     end
     if not CharDB then return end
 
-    if event == "QUEST_LOG_UPDATE" then
+    if event == "PLAYER_ENTERING_WORLD" then
+        SnapXP()
+    elseif event == "PLAYER_XP_UPDATE" or event == "PLAYER_LEVEL_UP" then
+        OnXPChanged()
+    elseif event == "PLAYER_LOGOUT" then
+        CharDB.rate.lastSeen = time()
+        return
+    elseif event == "QUEST_LOG_UPDATE" then
         CacheQuestLog()
     elseif event == "QUEST_TURNED_IN" then
         -- Learn typical quest XP per quest level from your own turn-ins.
@@ -600,6 +887,7 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         end
     end
 
+    if event ~= "PLAYER_TARGET_CHANGED" then xpBar:Refresh() end
     if f:IsShown() then
         if event == "PLAYER_TARGET_CHANGED" then f:RefreshTarget() else f:Refresh() end
     end
@@ -646,10 +934,45 @@ SlashCmdList.DINGCALC = function(msg)
                 Fmt(HistMedian(l.hist, l.n)), Fmt(floor(l.sum / l.n + 0.5)), Fmt(lo), Fmt(hi)))
         end
         if #levels == 0 then print("  (no turn-ins yet)") end
+    elseif msg == "rate" then
+        -- XP per hour of this character, level by level, then all characters.
+        local R = RateData()
+        print("|cff9966ffDingCalc|r: XP per hour, this character, by level:")
+        local levels = {}
+        for l in pairs(R.levels) do levels[#levels + 1] = l end
+        table.sort(levels)
+        for _, l in ipairs(levels) do
+            local b = R.levels[l]
+            print(string.format("  lvl %d: %s XP/h, %s played, %s XP", l, Fmt(PerHour(b)), FmtTime(b.secs), Fmt(b.xp)))
+        end
+        if #levels == 0 then print("  (no data yet)") end
+        print("|cff9966ffDingCalc|r: all characters on this account:")
+        local keys = {}
+        for k in pairs(DB.chars or {}) do keys[#keys + 1] = k end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local c = DB.chars[k]
+            print(string.format("  %s (lvl %s %s): %s XP/h over %s", k, tostring(c.level), tostring(c.class or ""),
+                Fmt(PerHour(c)), FmtTime(c.secs)))
+        end
+    elseif msg == "resetrate" then
+        CharDB.rate = nil
+        RateInit()
+        if DB.chars then DB.chars[CharKey()] = nil end
+        print("|cff9966ffDingCalc|r: XP rate cleared for this character")
+        if f:IsShown() then f:Refresh() end
     elseif msg == "resetquests" then
         DB.quest = { normal = {}, elite = {}, dungeon = {} }
         print("|cff9966ffDingCalc|r: learned quest XP cleared (all characters)")
         if f:IsShown() then f:Refresh() end
+    elseif msg == "bar" then
+        DB.bar = DB.bar == false
+        if DB.bar then xpBar:Show() else xpBar:Hide() end
+        print("|cff9966ffDingCalc|r: XP bar " .. (DB.bar and "shown" or "hidden"))
+    elseif msg == "bar top" or msg == "bar bottom" then
+        DB.barPos = msg:sub(5)
+        xpBar:Place()
+        print("|cff9966ffDingCalc|r: XP bar at the " .. DB.barPos .. " of the screen")
     elseif msg == "reset" then
         DB.pos = nil
         f:ClearAllPoints()
