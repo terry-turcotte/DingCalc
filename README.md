@@ -7,12 +7,13 @@ A **WoW Forever** addon that tells you how many **kills** and **quests** you nee
 ## Features
 
 - **Window** (`/ding`): your XP to next level, with an XP bar and rested XP. It shows:
-  - a **kills table** with one row per difficulty color, **green**, **yellow** and **orange** (red mobs are left out): the mob levels in that color, XP per kill and kills needed, for normal and elite mobs. Values are shown as a range, from the lowest to the highest level of the color;
-  - a **quests table**, by the same green / yellow / orange colors: the quest levels in that color, XP per quest (with the penalty once you are 6+ levels above the quest) and how many quests you need. Normal, Elite and Dungeon quests each have their own table, switched with a button next to the title;
+  - a **Normal / Elite / Dungeon** button (top right) that switches both tables at once;
+  - a **kills table** with one row per difficulty color, shown as a dot: **green**, **yellow** and **orange** (red mobs are left out). Each row shows the median (P50) XP per kill over the mob levels in that color, and the kills needed at that XP. Elite mobs give 2x XP. Dungeon mobs give 60% of their Classic Era XP (WoW Forever hotfix of November 8), so 1.2x, or 40% less than a world elite;
+  - a **quests table**, by the same colors: the median XP per quest over the quest levels in that color (with the penalty once you are 6+ levels above the quest), and how many quests you need;
   - your **quest log**: total XP of the quests in your log, and the share of what you need;
   - your **target**: kills to ding on the mob you are targeting.
 - **XP bar**: a full-width strip docked at the bottom of the screen (like Titan Panel) with your level, XP, live **XP per hour** for this **session**, the **last hour**, **this level** and this **character**, and the **time to ding** at your current pace. Hover it for the XP and time played behind each rate; left-click opens the window, right-click moves it to the top or bottom of the screen.
-- **Tooltip**: a "Kills to ding: N" line when you hover an enemy mob.
+- **Tooltip**: a "Kills to ding: N" line when you hover an enemy mob (with the dungeon XP penalty when you are inside a dungeon).
 - **Rested XP** is counted: kills give double XP until the pool runs out.
 - **Well-Rested (+3%)** and **Well Fed (+5% kills)** checkboxes, saved per character.
 - **Learns from your journey**: every quest you turn in is recorded, and its XP feeds the averages. The data is shared by all characters on your account, so each alt starts with what your other characters learned. Levels with no data yet show an estimate, marked `~`.

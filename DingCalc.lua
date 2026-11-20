@@ -43,6 +43,13 @@ local function MobXP(p, m)
     return floor((m * 5 + 45) * (1 - (p - m) / ZeroDiff(p)) + 0.5)
 end
 
+-- Kill XP by mob kind, as a multiple of a normal mob's XP. Elites give
+-- double. Dungeon kills give 60% of their Classic Era value (WoW Forever
+-- hotfix of November 8: raised from 40% to 60%), and dungeon mobs are
+-- elites in Classic Era, so a dungeon kill gives 2 x 0.6 = 1.2x.
+local DUNGEON_KILL_MULT = 0.6
+local KILL_MULT = { normal = 1, elite = 2, dungeon = 2 * DUNGEON_KILL_MULT }
+
 -- Quest XP penalty once you are 6+ levels above the quest.
 -- Turn-ins with a penalty below this are not learned from: working back to
 -- full XP from x0.4 or less multiplies the reward's rounding error 2.5-10x.
@@ -171,6 +178,30 @@ local function State()
     local cur, maxXP = UnitXP("player"), UnitXPMax("player")
     local rested = GetXPExhaustion and GetXPExhaustion() or 0
     return p, cur, maxXP, max(0, maxXP - cur), rested or 0
+end
+
+local function InDungeon()
+    local inInstance, kind = IsInInstance()
+    return inInstance and (kind == "party" or kind == "raid")
+end
+
+-- XP for one kill of this unit, counting elite status and the dungeon penalty.
+local function UnitKillXP(p, unit, km)
+    local m = UnitLevel(unit)
+    if not m or m <= 0 then return nil end
+    local cls = UnitClassification(unit)
+    local elite = cls == "elite" or cls == "rareelite" or cls == "worldboss"
+    local xp = floor(MobXP(p, m) * km) * (elite and 2 or 1)
+    if InDungeon() then xp = floor(xp * DUNGEON_KILL_MULT) end
+    return xp, m, elite
+end
+
+-- Median (P50) of a list of numbers, rounded; nil when empty.
+local function Median(t)
+    if #t == 0 then return nil end
+    table.sort(t)
+    local n = #t
+    return floor((t[floor((n + 1) / 2)] + t[floor(n / 2) + 1]) / 2 + 0.5)
 end
 
 local function Mult(forKills)
@@ -450,6 +481,16 @@ local cbRested = Check("Well-Rested (+3%)", "wellRested", 8, -96)
 local cbFed = Check("Well Fed (+5% kills)", "wellFed", 172, -96)
 
 -- Table builder
+-- Round dot in a band color, one per table row.
+local function Dot(color)
+    local t = f:CreateTexture(nil, "OVERLAY")
+    t:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask")
+    t:SetSize(10, 10)
+    t:SetVertexColor(tonumber(color:sub(1, 2), 16) / 255,
+        tonumber(color:sub(3, 4), 16) / 255, tonumber(color:sub(5, 6), 16) / 255)
+    return t
+end
+
 local function MakeTable(top, heads, widths, nrows)
     local t = { rows = {} }
     local x = 12
@@ -468,6 +509,9 @@ local function MakeTable(top, heads, widths, nrows)
             fs:SetWidth(widths[i])
             fs:SetPoint("TOPLEFT", x, top - 4 - r * 15)
             row[i] = fs
+            if i == 1 and BANDS[r] then
+                Dot(BANDS[r].color):SetPoint("LEFT", fs, "LEFT", 2, 0)
+            end
             x = x + widths[i]
         end
         t.rows[r] = row
@@ -477,17 +521,17 @@ end
 
 local killsTitle = Text(f, "GameFontNormal")
 killsTitle:SetPoint("TOPLEFT", 12, -124)
-killsTitle:SetText("Kills (solo)")
-local kills = MakeTable(-142, { "Mob lvl", "XP", "Kills", "Elite kills" }, { 104, 70, 70, 72 }, #BANDS)
+local kills = MakeTable(-142, { "", "XP per kill", "Kills" }, { 24, 146, 146 }, #BANDS)
 
 local questsTitle = Text(f, "GameFontNormal")
 questsTitle:SetPoint("TOPLEFT", 12, -206)
 questsTitle:SetText("Quests")
 
--- Quest type selector: click to cycle Normal -> Elite -> Dungeon.
+-- Mode selector for both tables (mob kind and quest type): click to cycle
+-- Normal -> Elite -> Dungeon. Saved as DB.questType.
 local typeBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 typeBtn:SetSize(90, 20)
-typeBtn:SetPoint("LEFT", questsTitle, "RIGHT", 10, 0)
+typeBtn:SetPoint("TOPRIGHT", -30, -6)
 typeBtn:SetScript("OnClick", function()
     local cur = DB.questType or "normal"
     for i, t in ipairs(QUEST_TYPES) do
@@ -495,7 +539,7 @@ typeBtn:SetScript("OnClick", function()
     end
     f:Refresh()
 end)
-local quests = MakeTable(-224, { "Quest lvl", "XP per quest", "Quests" }, { 104, 110, 102 }, #BANDS)
+local quests = MakeTable(-224, { "", "XP per quest", "Quests" }, { 24, 146, 146 }, #BANDS)
 
 local logLine = Text(f)
 logLine:SetPoint("TOPLEFT", 12, -292)
@@ -506,20 +550,6 @@ local function Fmt(n)
     local s = tostring(n)
     local out = s:reverse():gsub("(%d%d%d)", "%1 "):reverse()
     return (out:gsub("^ ", ""))
-end
-
--- "a" or "a–b" (smallest to largest); "-" when there is no value.
-local function Range(a, b)
-    if not a then return "-" end
-    if a > b then a, b = b, a end
-    if a == b then return Fmt(a) end
-    return Fmt(a) .. "–" .. Fmt(b)
-end
-
--- First cell of a band row: colored band name and its level range.
-local function BandLabel(band, lo, hi)
-    local levels = lo > hi and "" or (lo == hi and (" " .. lo) or (" " .. lo .. "–" .. hi))
-    return "|cff" .. band.color .. band.name .. "|r" .. levels
 end
 
 function f:Refresh()
@@ -534,53 +564,47 @@ function f:Refresh()
     cbRested:SetChecked(CharDB.wellRested)
     cbFed:SetChecked(CharDB.wellFed)
 
-    -- One row per difficulty band: level range, then XP and counts as
-    -- "least–most" over the levels in the band.
+    -- One row per difficulty band (color dot), with the P50 over the levels
+    -- in the band: median XP, and the count needed at that XP.
+    local qt = DB.questType or "normal"
+    typeBtn:SetText(TYPE_LABEL[qt])
+    killsTitle:SetText("Kills (" .. TYPE_LABEL[qt]:lower() .. ")")
+    questsTitle:SetText("Quests (" .. TYPE_LABEL[qt]:lower() .. ")")
     local km = Mult(true)
     for r, band in ipairs(BANDS) do
         local lo, hi = max(1, band.lo(p)), band.hi(p)
         local row = kills.rows[r]
-        local xlo, xhi
+        local xps = {}
         for m = lo, hi do
-            local xp = floor(MobXP(p, m) * km)
-            if xp > 0 then
-                xlo, xhi = min(xlo or xp, xp), max(xhi or xp, xp)
-            end
+            local xp = floor(floor(MobXP(p, m) * km) * KILL_MULT[qt])
+            if xp > 0 then xps[#xps + 1] = xp end
         end
-        row[1]:SetText(BandLabel(band, lo, hi))
-        row[2]:SetText(Range(xlo, xhi))
-        if xlo then
-            row[3]:SetText(Range(KillsNeeded(xhi, remain, rested), KillsNeeded(xlo, remain, rested)))
-            row[4]:SetText(Range(KillsNeeded(xhi * 2, remain, rested), KillsNeeded(xlo * 2, remain, rested)))
-        else
-            row[3]:SetText("-")
-            row[4]:SetText("-")
-        end
+        local xp = Median(xps)
+        row[2]:SetText(Fmt(xp))
+        row[3]:SetText(xp and Fmt(KillsNeeded(xp, remain, rested)) or "-")
     end
 
-    local qt = DB.questType or "normal"
-    typeBtn:SetText(TYPE_LABEL[qt])
     local qm = Mult(false)
     local anyData = false
     for r, band in ipairs(BANDS) do
         local lo, hi = max(1, band.lo(p)), band.hi(p)
         local row = quests.rows[r]
-        local xlo, xhi, anyEst
+        local xps, anyEst = {}, false
         for q = lo, hi do
             local base, est = TypicalQuestXP(qt, q)
             if base then
                 local xp = floor(base * QuestMult(p, q) * qm)
                 if xp > 0 then
-                    xlo, xhi = min(xlo or xp, xp), max(xhi or xp, xp)
+                    xps[#xps + 1] = xp
                     anyEst = anyEst or est
                 end
             end
         end
-        row[1]:SetText(BandLabel(band, lo, hi))
-        if xlo then
+        local xp = Median(xps)
+        if xp then
             anyData = true
-            row[2]:SetText((anyEst and "~" or "") .. Range(xlo, xhi))
-            row[3]:SetText(Range(ceil(remain / xhi), ceil(remain / xlo)))
+            row[2]:SetText((anyEst and "~" or "") .. Fmt(xp))
+            row[3]:SetText(Fmt(ceil(remain / xp)))
         else
             row[2]:SetText("-")
             row[3]:SetText("-")
@@ -604,11 +628,8 @@ function f:RefreshTarget()
     local n, text = nil, nil
     if UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsPlayer("target") then
         local p, _, _, remain, rested = State()
-        local m = UnitLevel("target")
-        if m and m > 0 then
-            local cls = UnitClassification("target")
-            local elite = cls == "elite" or cls == "rareelite" or cls == "worldboss"
-            local xp = floor(MobXP(p, m) * Mult(true)) * (elite and 2 or 1)
+        local xp, m, elite = UnitKillXP(p, "target", Mult(true))
+        if xp then
             n = KillsNeeded(xp, remain, rested)
             text = string.format("Target: |cff%s%d%s|r  %s XP  →  %s kills to ding",
                 DiffColor(p, m), m, elite and " elite" or "", Fmt(xp), n and Fmt(n) or "gray")
@@ -771,11 +792,8 @@ local function OnTooltipUnit(tt)
     if not unit or UnitIsPlayer(unit) or not UnitCanAttack("player", unit) then return end
     local p, _, _, remain, rested = State()
     if p >= 60 then return end
-    local m = UnitLevel(unit)
-    if not m or m <= 0 then return end
-    local cls = UnitClassification(unit)
-    local elite = cls == "elite" or cls == "rareelite" or cls == "worldboss"
-    local xp = floor(MobXP(p, m) * Mult(true)) * (elite and 2 or 1)
+    local xp = UnitKillXP(p, unit, Mult(true))
+    if not xp then return end
     local n = KillsNeeded(xp, remain, rested)
     if n then
         tt:AddLine(string.format("Kills to ding: %s  (%s XP each)", Fmt(n), Fmt(xp)), 0.6, 0.8, 1)
